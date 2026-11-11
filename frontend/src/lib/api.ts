@@ -8,7 +8,7 @@ import type {
 
 const URL_CONFIGURADA = import.meta.env.VITE_API_URL as string | undefined;
 
-export const API_URL = (URL_CONFIGURADA ?? "http://localhost:8000").replace(
+export const API_URL = (URL_CONFIGURADA ?? "").replace(
   /\/+$/,
   "",
 );
