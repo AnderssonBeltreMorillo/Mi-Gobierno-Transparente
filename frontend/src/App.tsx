@@ -145,7 +145,22 @@ export default function App() {
       : []),
     [datos?.licitaciones],
   );
+  
   const grupos = useMemo(() => agruparLicitaciones(licitaciones), [licitaciones]);
+  
+  // FILTRADO GLOBAL EN LA VISTA PRINCIPAL
+  const gruposFiltrados = useMemo(() => {
+    if (!busqueda.trim()) return grupos;
+    const termino = busqueda.trim().toLowerCase();
+    return grupos.filter((grupo) => {
+      const { original } = grupo;
+      return (
+        original.codigo.toLowerCase().includes(termino) ||
+        original.titulo.toLowerCase().includes(termino) ||
+        original.fecha_publicacion.toLowerCase().includes(termino)
+      );
+    });
+  }, [grupos, busqueda]);
 
   const cargar = useCallback(async (signal?: AbortSignal, forceRefresh = false) => {
     setCargando(true);
@@ -194,7 +209,30 @@ export default function App() {
       {error && <div className="mb-4 flex gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800"><AlertCircle className="h-4 w-4 shrink-0"/>No se pudo actualizar la información: {error}. Se muestran los últimos datos cargados.</div>}
       {!detalle ? <>
         <section className="relative mb-6 overflow-hidden rounded-[2rem] bg-[#002D62] p-6 text-white shadow-xl sm:p-8"><div aria-hidden="true" className="absolute inset-y-0 right-0 w-2 bg-[#CE1126]"/><p className="text-[11px] font-bold uppercase tracking-[0.2em] text-white/65">Transparencia · eficiencia fiscal · integridad institucional</p><h2 className="mt-2 text-2xl font-black tracking-tight sm:text-3xl">Mi Gobierno Transparente</h2><p className="mt-3 max-w-4xl text-sm leading-6 text-white/85">Plataforma automatizada de auditoría continua e inteligencia de precios que cruza información de compras públicas de la DGCP con catálogos de comercios formales.</p><p className="mt-3 max-w-4xl text-sm leading-6 text-white/75">Su objetivo es transparentar el gasto público, detectar sobrevaloraciones por renglón y respaldar las medidas de eficiencia fiscal e integridad institucional promovidas por el presidente Luis Abinader Corona.</p></section>
-        <section className="rounded-[2rem] border border-slate-200 bg-white p-6 shadow-sm sm:p-8"><p className="text-[11px] font-bold uppercase tracking-[0.18em] text-ultramar/60">Historial del proceso · documentos oficiales</p><h2 className="mt-1 text-2xl font-black text-slate-950">Licitaciones completas analizadas</h2><div className="mt-5 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">{[["Licitaciones analizadas", grupos.length], ["Monto global en margen", grupos.filter((grupo) => grupo.original.estado === "Justa").length], ["Con renglones irregulares", grupos.filter((grupo) => grupo.original.articulos_alerta_amarilla > 0).length], ["Con renglones sobrevalorados", grupos.filter((grupo) => grupo.original.articulos_alto_riesgo > 0).length]].map(([label, value]) => <div key={label} className="rounded-xl border border-slate-200 px-3 py-2 text-center"><b className="block text-lg text-slate-900">{value}</b><span className="text-xs text-slate-500">{label}</span></div>)}</div><p className="mt-3 text-xs leading-5 text-slate-500">Los KPIs y el resumen financiero toman el Pliego Original; las enmiendas permanecen disponibles en el historial.</p><ResumenImpactoLicitaciones licitaciones={licitaciones}/>{grupos.map((grupo) => <TarjetaLicitacion key={grupo.original.codigo} grupo={grupo} onClick={(version) => { setVersionActiva(version.id_version); setDetalle(true); }}/>)}</section>
+        <section className="rounded-[2rem] border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
+          <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-ultramar/60">Historial del proceso · documentos oficiales</p>
+          <h2 className="mt-1 text-2xl font-black text-slate-950">Licitaciones completas analizadas</h2>
+          
+          <div className="mt-6 mb-2">
+            <input
+              type="text"
+              placeholder="Buscar por código (ej. DASAC-CCC...), título o fecha..."
+              value={busqueda}
+              onChange={(e) => setBusqueda(e.target.value)}
+              className="w-full p-3 border border-slate-300 rounded-xl shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-600 text-sm"
+            />
+          </div>
+
+          <div className="mt-5 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">{[["Licitaciones analizadas", grupos.length], ["Monto global en margen", grupos.filter((grupo) => grupo.original.estado === "Justa").length], ["Con renglones irregulares", grupos.filter((grupo) => grupo.original.articulos_alerta_amarilla > 0).length], ["Con renglones sobrevalorados", grupos.filter((grupo) => grupo.original.articulos_alto_riesgo > 0).length]].map(([label, value]) => <div key={label} className="rounded-xl border border-slate-200 px-3 py-2 text-center"><b className="block text-lg text-slate-900">{value}</b><span className="text-xs text-slate-500">{label}</span></div>)}</div>
+          <p className="mt-3 text-xs leading-5 text-slate-500">Los KPIs y el resumen financiero toman el Pliego Original; las enmiendas permanecen disponibles en el historial.</p>
+          <ResumenImpactoLicitaciones licitaciones={licitaciones}/>
+          
+          {gruposFiltrados.length > 0 ? (
+            gruposFiltrados.map((grupo) => <TarjetaLicitacion key={grupo.original.codigo} grupo={grupo} onClick={(version) => { setVersionActiva(version.id_version); setDetalle(true); setBusqueda(""); }}/>)
+          ) : (
+            <p className="mt-8 text-center text-sm text-slate-500">No se encontraron licitaciones que coincidan con la búsqueda.</p>
+          )}
+        </section>
       </> : <DetalleErrorBoundary onVolver={() => setDetalle(false)}><>
         <button type="button" onClick={() => setDetalle(false)} className="mb-5 rounded-full border border-slate-200 bg-white px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-50">← Volver al listado de licitaciones</button>
         <div role="tablist" aria-label="Versiones del procedimiento" className="mb-4 flex flex-wrap gap-2">{licitaciones.filter((version) => version.codigo === licitacion.codigo).map((version) => <button key={version.id_version} type="button" role="tab" aria-selected={versionActiva === version.id_version} onClick={() => { setVersionActiva(version.id_version); setFiltro("todos"); setBusqueda(""); }} className={`rounded-full border px-4 py-2 text-xs font-bold ${versionActiva === version.id_version ? "border-ultramar bg-ultramar text-white" : "border-slate-200 bg-white text-slate-600"}`}>{version.titulo}</button>)}</div>

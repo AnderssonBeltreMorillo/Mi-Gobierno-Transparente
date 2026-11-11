@@ -218,7 +218,8 @@ def evaluar_renglones(
                     else:
                          print("Advertencia: Gemini devolvió un resultado vacío para este bloque. Usando evaluación local (fallback).")
                     
-                    time.sleep(10)
+                    # Pausa incrementada a 60 segundos para evitar saturar la API
+                    time.sleep(60)
 
         # 3. Procesar los resultados finales
         for item in articulos_objetivo:
@@ -573,7 +574,7 @@ def main() -> int:
     hoy = date.today()
     dias = max(1, int(os.getenv("DGCP_LOOKBACK_DAYS", "120")))
     max_paginas = max(1, int(os.getenv("DGCP_MAX_PAGES", "20")))
-    max_procesos = max(1, int(os.getenv("DGCP_MAX_PROCESSES", "3")))
+    max_procesos = max(1, int(os.getenv("DGCP_MAX_PROCESSES", "50"))) # LIMITE AMPLIADO A 50
     desde = hoy - timedelta(days=dias)
     api = DgcpOpenDataClient()
     manuales, notices = _leer_filtros_manuales()
@@ -592,6 +593,13 @@ def main() -> int:
         credenciales_json=configuracion.credenciales_json,
         emulador_host=configuracion.emulador_host,
     )
+    
+    # LISTA DE PALABRAS CLAVE PARA FILTRAR
+    palabras_clave_permitidas = [
+        "alimentos", "bebidas", "comida", "provisiones", "aseo", 
+        "limpieza", "detergente", "escoba", "trapeador", "cubeta", "supermercado"
+    ]
+
     with CatalogoDirectoSupermercados() as buscador:
         nuevos = _procesos_nuevos(cliente, procesos)
         if nuevos:
@@ -599,6 +607,12 @@ def main() -> int:
             for proceso in nuevos:
                 if sincronizados >= max_procesos:
                     break
+                
+                # FILTRO DE RUBRO ANTES DE PROCESAR
+                texto_filtro = f"{proceso.get('titulo', '')} {proceso.get('descripcion', '')} {proceso.get('objeto_proceso', '')}".lower()
+                if not any(palabra in texto_filtro for palabra in palabras_clave_permitidas):
+                    continue
+
                 if _procesar_proceso(cliente, buscador, api, proceso):
                     sincronizados += 1
             print(
