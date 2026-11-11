@@ -522,17 +522,19 @@ def recalcular_documento(
 
 
 def _procesos_nuevos(
-    cliente: firestore.Client,
-    procesos: list[dict[str, object]],
+   cliente: firestore.Client,
+   procesos: list[dict[str, object]],
 ) -> list[dict[str, object]]:
-    nuevos: list[dict[str, object]] = []
-    for proceso in procesos:
-        codigo = str(proceso.get("codigo_proceso", "")).strip()
-        if not codigo:
-            continue
-        if not cliente.collection("licitaciones").document(codigo).get().exists:
-            nuevos.append(proceso)
-    return nuevos
+   nuevos: list[dict[str, object]] = []
+   for proceso in procesos:
+       codigo = str(proceso.get("codigo_proceso", "")).strip()
+       if not codigo:
+           continue
+       # ARREGLO: Verifica que no esté procesada ni en la lista de descartadas
+       if not cliente.collection("licitaciones").document(codigo).get().exists and \
+          not cliente.collection("licitaciones_descartadas").document(codigo).get().exists:
+           nuevos.append(proceso)
+   return nuevos
 
 
 def _siguiente_pendiente(cliente: firestore.Client) -> str | None:
@@ -546,97 +548,102 @@ def _siguiente_pendiente(cliente: firestore.Client) -> str | None:
 
 
 def _procesar_proceso(
-    cliente: firestore.Client,
-    buscador: CatalogoDirectoSupermercados,
-    api: DgcpOpenDataClient,
-    proceso: dict[str, object],
+   cliente: firestore.Client,
+   buscador: CatalogoDirectoSupermercados,
+   api: DgcpOpenDataClient,
+   proceso: dict[str, object],
 ) -> bool:
-    codigo = str(proceso.get("codigo_proceso", "")).strip()
-    if not codigo:
-        return False
-    articulos = [
-        dict(articulo) for articulo in api.obtener_articulos(codigo)
-    ]
-    if not any(_articulo_objetivo(articulo) for articulo in articulos):
-        return False
-    resultado = evaluar_renglones(proceso, articulos, buscador)
-    _guardar_agrupado(cliente, proceso, resultado)
-    version = resultado["version"]
-    print(
-        f"Sincronizado {codigo}: {len(version['auditoria_renglones'])} renglones "
-        f"evaluados; {len(resultado['renglones_sin_referencia'])} sin precio de "
-        f"supermercado. {version['enlace_dgcp']}"
-    )
-    return True
+   codigo = str(proceso.get("codigo_proceso", "")).strip()
+   if not codigo:
+       return False
+   articulos = [
+       dict(articulo) for articulo in api.obtener_articulos(codigo)
+   ]
+   if not any(_articulo_objetivo(articulo) for articulo in articulos):
+       # ARREGLO: Registrarla como descartada para romper el bucle infinito
+       cliente.collection("licitaciones_descartadas").document(codigo).set({
+           "codigo": codigo,
+           "motivo": "Sin artículos auditables en supermercado"
+       })
+       return False
+   resultado = evaluar_renglones(proceso, articulos, buscador)
+   _guardar_agrupado(cliente, proceso, resultado)
+   version = resultado["version"]
+   print(
+       f"Sincronizado {codigo}: {len(version['auditoria_renglones'])} renglones "
+       f"evaluados; {len(resultado['renglones_sin_referencia'])} sin precio de "
+       f"supermercado. {version['enlace_dgcp']}"
+   )
+   return True
 
 
 def main() -> int:
-    hoy = date.today()
-    dias = max(1, int(os.getenv("DGCP_LOOKBACK_DAYS", "120")))
-    max_paginas = max(1, int(os.getenv("DGCP_MAX_PAGES", "20")))
-    max_procesos = max(1, int(os.getenv("DGCP_MAX_PROCESSES", "50"))) # LIMITE AMPLIADO A 50
-    desde = hoy - timedelta(days=dias)
-    api = DgcpOpenDataClient()
-    manuales, notices = _leer_filtros_manuales()
-    procesos = _descubrir(
-        api,
-        desde=desde,
-        hasta=hoy,
-        max_paginas=max_paginas,
-        manuales=manuales,
-        notice_uids=notices,
-    )
-    configuracion = cargar_configuracion()
-    cliente = crear_cliente_firestore(
-        project_id=configuracion.project_id,
-        ruta_credenciales=configuracion.ruta_credenciales,
-        credenciales_json=configuracion.credenciales_json,
-        emulador_host=configuracion.emulador_host,
-    )
-    
-    # LISTA DE PALABRAS CLAVE PARA FILTRAR
-    palabras_clave_permitidas = [
-        "alimentos", "bebidas", "comida", "provisiones", "aseo", 
-        "limpieza", "detergente", "escoba", "trapeador", "cubeta", "supermercado"
-    ]
-
-    with CatalogoDirectoSupermercados() as buscador:
-        nuevos = _procesos_nuevos(cliente, procesos)
-        if nuevos:
-            sincronizados = 0
-            for proceso in nuevos:
-                if sincronizados >= max_procesos:
-                    break
-                
-                # FILTRO DE RUBRO ANTES DE PROCESAR
-                texto_filtro = f"{proceso.get('titulo', '')} {proceso.get('descripcion', '')} {proceso.get('objeto_proceso', '')}".lower()
-                if not any(palabra in texto_filtro for palabra in palabras_clave_permitidas):
-                    continue
-
-                if _procesar_proceso(cliente, buscador, api, proceso):
-                    sincronizados += 1
-            print(
-                f"Procesos DGCP nuevos agrupados en Firestore: {sincronizados} "
-                f"(ventana {desde.isoformat()}–{hoy.isoformat()})."
-            )
-            return 0
-
-        pendiente = _siguiente_pendiente(cliente)
-        if pendiente:
-            resumen = recalcular_documento(cliente, buscador, pendiente)
-            print(
-                f"Sin licitaciones nuevas; lote pendiente {pendiente} "
-                f"recalculado: {resumen['renglones']} renglones, "
-                f"{resumen['sin_referencia']} sin referencia."
-            )
-            return 0
-
-    print(
-        "Sin licitaciones nuevas ni lotes pendientes; se espera al siguiente "
-        "ciclo de 2 horas."
-    )
-    return 0
-
-
+   hoy = date.today()
+   dias = max(1, int(os.getenv("DGCP_LOOKBACK_DAYS", "120")))
+   max_paginas = max(1, int(os.getenv("DGCP_MAX_PAGES", "20")))
+   max_procesos = max(1, int(os.getenv("DGCP_MAX_PROCESSES", "50")))
+   desde = hoy - timedelta(days=dias)
+   api = DgcpOpenDataClient()
+   manuales, notices = _leer_filtros_manuales()
+   procesos = _descubrir(
+       api,
+       desde=desde,
+       hasta=hoy,
+       max_paginas=max_paginas,
+       manuales=manuales,
+       notice_uids=notices,
+   )
+   configuracion = cargar_configuracion()
+   cliente = crear_cliente_firestore(
+       project_id=configuracion.project_id,
+       ruta_credenciales=configuracion.ruta_credenciales,
+       credenciales_json=configuracion.credenciales_json,
+       emulador_host=configuracion.emulador_host,
+   )
+   palabras_clave_permitidas = [
+       "alimentos", "bebidas", "comida", "provisiones", "aseo",
+       "limpieza", "detergente", "escoba", "trapeador", "cubeta", "supermercado"
+   ]
+   with CatalogoDirectoSupermercados() as buscador:
+       nuevos = _procesos_nuevos(cliente, procesos)
+       if nuevos:
+           sincronizados = 0
+           for proceso in nuevos:
+               if sincronizados >= max_procesos:
+                   break
+               codigo = str(proceso.get("codigo_proceso", ""))
+               texto_filtro = f"{proceso.get('titulo', '')} {proceso.get('descripcion', '')} {proceso.get('objeto_proceso', '')}".lower()
+               if not any(palabra in texto_filtro for palabra in palabras_clave_permitidas):
+                   # ARREGLO: Registrarla como descartada para que no la lea en el siguiente ciclo
+                   cliente.collection("licitaciones_descartadas").document(codigo).set({
+                       "codigo": codigo,
+                       "motivo": "No cumple filtro de rubro"
+                   })
+                   continue
+               if _procesar_proceso(cliente, buscador, api, proceso):
+                   sincronizados += 1
+           # ARREGLO: Si sincronizó algo válido, termina. Si todas fueron basura, que no se rinda y pase a pendientes.
+           if sincronizados > 0:
+               print(
+                   f"Procesos DGCP nuevos agrupados en Firestore: {sincronizados} "
+                   f"(ventana {desde.isoformat()}–{hoy.isoformat()})."
+               )
+               return 0
+           else:
+               print("Licitaciones recientes descartadas por no ser del rubro. Pasando a historial...")
+       pendiente = _siguiente_pendiente(cliente)
+       if pendiente:
+           resumen = recalcular_documento(cliente, buscador, pendiente)
+           print(
+               f"Sin licitaciones nuevas; lote pendiente {pendiente} "
+               f"recalculado: {resumen['renglones']} renglones, "
+               f"{resumen['sin_referencia']} sin referencia."
+           )
+           return 0
+   print(
+       "Sin licitaciones nuevas ni lotes pendientes; se espera al siguiente "
+       "ciclo de 2 horas."
+   )
+   return 0
 if __name__ == "__main__":
-    raise SystemExit(main())
+   raise SystemExit(main())
