@@ -1,0 +1,7 @@
+firebase-admin
+google-genai
+requests
+beautifulsoup4
+fastapi
+pydantic
+python-dotenv
