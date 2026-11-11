@@ -1,0 +1,30 @@
+name: Sincronizar Licitaciones DGCP
+
+on:
+  schedule:
+    # Se ejecuta en el minuto 0 de cada segunda hora
+    - cron: '0 */2 * * *'
+  workflow_dispatch:
+    # Permite ejecutarlo manualmente desde GitHub con un botón
+
+jobs:
+  sincronizar:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Clonar el código
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11' # Usa la versión de tu proyecto
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Ejecutar sincronización
+        env:
+          FIREBASE_CREDENTIALS_JSON: ${{ secrets.FIREBASE_CREDENTIALS_JSON }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python sync_licitaciones_dgcp.py
