@@ -9,7 +9,7 @@ export const FUENTE_DGCP: Fuente = {
 };
 
 export const FUENTES_MERCADO = {
-  bravo: { nombre: "Bravo", url: "https://superbravo.com.do/" },
+  plazaLama: { nombre: "Plaza Lama", url: "https://plazalama.com.do/" },
   laSirena: { nombre: "La Sirena", url: "https://www.sirena.do/" },
   nacional: { nombre: "Nacional", url: "https://supermercadosnacional.com/" },
   jumbo: { nombre: "Jumbo", url: "https://www.jumbo.com.do/" },
@@ -38,7 +38,7 @@ const FUENTES_POR_PRODUCTO: Record<string, Fuente[]> = {
     { nombre: "Nacional", url: "https://supermercadosnacional.com/habichuela-roja-larga-lider-800-gr-2140272" },
     { nombre: "Jumbo", url: "https://jumbo.com.do/supermercado/despensa/arroz-cereales-y-legumbres/habichuelas/habichuela-roja-larga-lider-800-gr-2140272" },
     { nombre: "La Sirena", url: "https://nuevo.sirena.do/supermercado/despensa/arroz-habichuelas-y-otros-granos/habichuelas" },
-    { nombre: "Bravo", url: "https://superbravo.com.do/un-viaje-de-especiales/" },
+    { nombre: "Plaza Lama", url: "https://plazalama.com.do/search?name=habichuela%20roja" },
   ],
   "leche de coco (10.5 onzas)": [
     { nombre: "Jumbo", url: "https://jumbo.com.do/supermercado/panaderia-y-reposteria/reposteria/leche-y-crema-de-coco/leche-de-coco-la-famosa-10-5-onz-2033831" },

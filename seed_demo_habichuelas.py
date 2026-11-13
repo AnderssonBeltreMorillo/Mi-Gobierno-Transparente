@@ -4,7 +4,7 @@ El script conecta con Cloud Firestore usando ``firebase_credentials.json`` y
 ejecuta el flujo completo de la arquitectura:
 
 1. Registra cinco productos reales de alimentos.
-2. Registra un precio de mercado de referencia por producto (Bravo, La Sirena,
+2. Registra un precio de mercado de referencia por producto (Plaza Lama, La Sirena,
    Nacional y Jumbo).
 3. Registra el precio reportado en la licitación (con sobreprecios de 200 % a
    300 %, un caso de alerta amarilla del 10 % y un caso de precio justo).
@@ -90,8 +90,8 @@ class CasoDemo:
 
 
 # Los importes son referencias de demostración en pesos dominicanos (DOP).
-# Cada producto usa una fuente de mercado distinta para cubrir Bravo, La Sirena,
-# Nacional y Jumbo. Los precios reportados simulan las ofertas de la licitación.
+# Cada producto usa una fuente de mercado distinta para cubrir Plaza Lama, La
+# Sirena, Nacional y Jumbo. Los precios reportados simulan las ofertas de la licitación.
 CASOS_DEMO: tuple[CasoDemo, ...] = (
     CasoDemo(
         nombre="Lata de Habichuelas Rojas 15oz",
@@ -103,7 +103,7 @@ CASOS_DEMO: tuple[CasoDemo, ...] = (
             "habichuelas con dulce."
         ),
         precio_mercado=Decimal("110.00"),
-        fuente_mercado="Bravo (Santo Domingo)",
+        fuente_mercado="Plaza Lama (Santo Domingo)",
         precio_reportado=Decimal("330.00"),
         establecimiento="Licitación DGCP - Lote 1",
         distrito="Distrito Nacional",
@@ -163,7 +163,7 @@ CASOS_DEMO: tuple[CasoDemo, ...] = (
         marca="Guarina",
         descripcion="Paquete de galletas de leche para acompañar el kit.",
         precio_mercado=Decimal("75.00"),
-        fuente_mercado="Bravo (Santo Domingo)",
+        fuente_mercado="Plaza Lama (Santo Domingo)",
         precio_reportado=Decimal("72.00"),
         establecimiento="Licitación DGCP - Lote 5",
         distrito="Distrito Nacional",

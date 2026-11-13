@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 from decimal import Decimal
 from typing import Any
@@ -14,6 +15,7 @@ from mi_gobierno_transparente.infrastructure.exceptions import (
     ErrorDeBusquedaMercado,
 )
 from mi_gobierno_transparente.infrastructure.market_search_adapter import (
+    BuscadorPlazaLama,
     CatalogoDirectoSupermercados,
     OfertaSupermercado,
     SerpApiBuscadorSupermercados,
@@ -85,6 +87,78 @@ class _SesionConError:
 
     def get(self, *args: object, **kwargs: object) -> object:
         raise requests.RequestException("fallo de red simulado")
+
+
+class _RespuestaHtmlFalsa:
+    def __init__(self, texto: str) -> None:
+        self.text = texto
+
+    def raise_for_status(self) -> None:
+        return None
+
+
+class _SesionHtmlFalsa:
+    def __init__(self, texto: str) -> None:
+        self.texto = texto
+        self.headers: dict[str, str] = {}
+        self.llamadas: list[dict[str, Any]] = []
+
+    def get(self, url: str, *, timeout: float | None = None) -> object:
+        self.llamadas.append({"url": url, "timeout": timeout})
+        return _RespuestaHtmlFalsa(self.texto)
+
+
+class TestBuscadorPlazaLama(unittest.TestCase):
+    def test_consulta_el_buscador_con_la_url_esperada(self) -> None:
+        sesion = _SesionHtmlFalsa("<html></html>")
+        buscador = BuscadorPlazaLama(session=sesion, timeout=20)  # type: ignore[arg-type]
+
+        buscador.buscar("leche evaporada")
+
+        self.assertEqual(len(sesion.llamadas), 1)
+        self.assertEqual(
+            sesion.llamadas[0]["url"],
+            "https://plazalama.com.do/search?name=leche+evaporada",
+        )
+        self.assertEqual(sesion.llamadas[0]["timeout"], 20)
+
+    def test_extrae_productos_del_payload_de_next_js(self) -> None:
+        payload = json.dumps(
+            '1:{"name":"Leche de Coco Goya 400ml","price":145,"photosUrl":[],'
+            '"slug":"leche-de-coco-goya-400ml-41331021647","__typename":"CatalogProductModel"}'
+        )
+        html = f'<html><script>self.__next_f.push([1,{payload}])</script></html>'
+        buscador = BuscadorPlazaLama(session=_SesionHtmlFalsa(html))  # type: ignore[arg-type]
+
+        ofertas = buscador.buscar("leche")
+
+        self.assertEqual(len(ofertas), 1)
+        self.assertEqual(ofertas[0].producto, "Leche de Coco Goya 400ml")
+        self.assertEqual(ofertas[0].establecimiento, "Plaza Lama")
+        self.assertEqual(ofertas[0].monto, Decimal("145"))
+        self.assertEqual(ofertas[0].moneda, "DOP")
+        self.assertEqual(
+            ofertas[0].url,
+            "https://plazalama.com.do/leche-de-coco-goya-400ml-41331021647",
+        )
+
+    def test_extrae_productos_de_tarjetas_html_y_limpia_el_simbolo_de_peso(self) -> None:
+        html = """
+        <div class="product-card">
+          <h3 class="product-name">Canela entera 60 gr</h3>
+          <span class="price">RD$ 58,50</span>
+          <a href="/canela-entera-60-gr-41331021647">Ver producto</a>
+        </div>
+        """
+        buscador = BuscadorPlazaLama(session=_SesionHtmlFalsa(html))  # type: ignore[arg-type]
+
+        ofertas = buscador.buscar("canela", limite=5)
+
+        self.assertEqual(len(ofertas), 1)
+        self.assertEqual(ofertas[0].producto, "Canela entera 60 gr")
+        self.assertEqual(ofertas[0].monto, Decimal("58.50"))
+        self.assertEqual(ofertas[0].establecimiento, "Plaza Lama")
+        self.assertEqual(ofertas[0].moneda, "DOP")
 
 
 class TestSerpApiBuscadorSupermercados(unittest.TestCase):
@@ -188,7 +262,13 @@ class TestCatalogoDirectoSupermercados(unittest.TestCase):
           <span data-price-type="finalPrice"><span class="price">$60,00</span></span>
         </li></ul>
         """
-        html_bravo = "<table><tr><td>CANELA ENTERA 60 GR</td><td>$58,50</td></tr></table>"
+        html_plaza_lama = """
+        <div class="product-card">
+          <h3 class="product-name">CANELA ENTERA 60 GR</h3>
+          <span class="price">RD$ 58,50</span>
+          <a href="/canela-entera-60-gr-41331021647">Ver producto</a>
+        </div>
+        """
         sirena_json = [{
             "productName": "Canela entera 60 Gr",
             "linkText": "canela-entera-60-gr",
@@ -201,18 +281,26 @@ class TestCatalogoDirectoSupermercados(unittest.TestCase):
                 return httpx.Response(200, text=html_nacional)
             if host == "jumbo.com.do":
                 return httpx.Response(200, text=html_jumbo)
-            if host == "superbravo.com.do":
-                return httpx.Response(200, text=html_bravo)
             return httpx.Response(200, json=sirena_json)
 
+        plaza_lama = BuscadorPlazaLama(
+            session=_SesionHtmlFalsa(html_plaza_lama),  # type: ignore[arg-type]
+        )
         cliente = httpx.Client(transport=httpx.MockTransport(responder))
-        with CatalogoDirectoSupermercados(cliente=cliente, cache_ttl_segundos=10) as catalogo:
+        with CatalogoDirectoSupermercados(
+            cliente=cliente,
+            buscador_plaza_lama=plaza_lama,
+            cache_ttl_segundos=10,
+        ) as catalogo:
             ofertas = catalogo.buscar_para_renglon({
                 "descripcion_usuario": "CANELA SOBRE 2 ONZAS",
                 "unidad_medida": "Unidad",
             })
 
-        self.assertEqual({oferta.establecimiento for oferta in ofertas}, {"Nacional", "La Sirena", "Jumbo", "Bravo"})
+        self.assertEqual(
+            {oferta.establecimiento for oferta in ofertas},
+            {"Nacional", "La Sirena", "Jumbo", "Plaza Lama"},
+        )
         minima = seleccionar_oferta_minima(ofertas)
         self.assertEqual(minima.establecimiento, "La Sirena")
         self.assertEqual(minima.monto, Decimal("57.75"))
@@ -229,14 +317,16 @@ class TestCatalogoDirectoSupermercados(unittest.TestCase):
         def responder(request: httpx.Request) -> httpx.Response:
             if request.url.host == "supermercadosnacional.com":
                 return httpx.Response(200, text=html)
-            if request.url.host == "superbravo.com.do":
-                return httpx.Response(200, text="<table></table>")
             if request.url.host == "nuevo.sirena.do":
                 return httpx.Response(200, json=[])
             return httpx.Response(200, text="<ul></ul>")
 
+        plaza_lama = BuscadorPlazaLama(
+            session=_SesionHtmlFalsa("<html></html>"),  # type: ignore[arg-type]
+        )
         with CatalogoDirectoSupermercados(
             cliente=httpx.Client(transport=httpx.MockTransport(responder)),
+            buscador_plaza_lama=plaza_lama,
         ) as catalogo:
             ofertas = catalogo.buscar_para_renglon({
                 "descripcion_usuario": "LECHE EVAPORADA 15 OZ",

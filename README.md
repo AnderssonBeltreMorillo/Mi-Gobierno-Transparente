@@ -256,9 +256,9 @@ crear el índice `activo ASC`, `nombre_normalizado ASC` (y su variante con
 - `DgcpOpenDataClient` pagina la API oficial de Datos Abiertos (`/procesos` y
   `/procesos/articulos`) para descubrir procedimientos y sus renglones.
 - `CatalogoDirectoSupermercados` consulta sin clave de pago la búsqueda Magento
-  de Nacional/Jumbo, el endpoint público VTEX de La Sirena y la tabla pública
-  de precios al costo de Bravo. Solo conserva coincidencias verificables de
-  nombre/presentación y escoge el menor precio DOP.
+  de Nacional/Jumbo, el endpoint público VTEX de La Sirena y el buscador web de
+  Plaza Lama. Solo conserva coincidencias verificables de nombre/presentación y
+  escoge el menor precio DOP.
 - `sync_licitaciones_dgcp.py` busca automáticamente los procesos de alimentos
   y aseo en los últimos 120 días si `DGCP_PROCESS_URLS` no está configurada;
   opcionalmente admite códigos de proceso o fichas oficiales para limitar la
@@ -364,7 +364,7 @@ python seed_demo_habichuelas.py --limpiar
 ```
 
 El seed registra 5 productos de alimentos, precios de mercado de referencia en
-DOP (Bravo, La Sirena, Nacional y Jumbo), precios reportados de la licitación y
+DOP (Plaza Lama, La Sirena, Nacional y Jumbo), precios reportados de la licitación y
 ejecuta `EvaluarPrecio` para cada uno. Incluye tres casos de alto riesgo
 (200 %, 250 % y 300 %), un caso de alerta amarilla (10 %) y un caso de precio
 justo. Al final imprime el resumen de riesgo persistido.

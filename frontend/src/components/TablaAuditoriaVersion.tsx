@@ -18,7 +18,7 @@ function nombreSupermercado(fuente: string | null | undefined): string {
   if (typeof fuente !== "string" || !fuente.trim()) return "Catálogo";
   const etiqueta = fuente.split("|")[0]?.trim();
   const valor = etiqueta || fuente;
-  const nombreExplicito = ["Nacional", "Jumbo", "La Sirena", "Bravo"].find(
+  const nombreExplicito = ["Nacional", "Jumbo", "La Sirena", "Plaza Lama"].find(
     (nombre) => valor.toLocaleLowerCase("es").includes(nombre.toLocaleLowerCase("es")),
   );
   if (nombreExplicito) return nombreExplicito;
@@ -30,7 +30,7 @@ function nombreSupermercado(fuente: string | null | undefined): string {
     if (dominio.includes("nacional")) return "Nacional";
     if (dominio.includes("jumbo")) return "Jumbo";
     if (dominio.includes("sirena")) return "La Sirena";
-    if (dominio.includes("superbravo")) return "Bravo";
+    if (dominio.includes("plazalama")) return "Plaza Lama";
   } catch {
     return valor || "Catálogo";
   }

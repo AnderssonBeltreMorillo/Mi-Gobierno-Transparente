@@ -77,7 +77,7 @@ class TestAPI(TestCase):
             RegistrarPrecioMercadoCommand(
                 producto_id=self.producto_id,
                 monto=Decimal("100.00"),
-                fuente="Bravo (Santo Domingo)",
+                fuente="Plaza Lama (Santo Domingo)",
             )
         )
         reportado = RegistrarPrecioReportado(

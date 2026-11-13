@@ -7,7 +7,7 @@ Propósito: documentación del estado actual del repositorio para que otro LLM (
 ===============================================================================
 Aplicación de auditoría de compras públicas de República Dominicana. Cruza
 licitaciones de la DGCP con precios de catálogos de supermercados (Nacional,
-Jumbo, La Sirena y Bravo), detecta sobreprecios por renglón y los publica en un
+Jumbo, La Sirena y Plaza Lama), detecta sobreprecios por renglón y los publica en un
 dashboard React.
 
 Arquitectura:
@@ -219,11 +219,11 @@ Archivo principal: `infrastructure/market_search_adapter.py`.
 - Nacional: Magento HTML `https://supermercadosnacional.com/catalogsearch/result/`.
 - Jumbo: Magento HTML `https://jumbo.com.do/catalogsearch/result/`.
 - La Sirena: API VTEX `https://nuevo.sirena.do/api/catalog_system/pub/products/search`.
-- Bravo: tabla pública `https://superbravo.com.do/productosalcosto/`.
+- Plaza Lama: buscador web `https://plazalama.com.do/search?name={consulta}`.
 
 Comportamiento:
 - Rate limit por host: mínimo 0.25 s entre solicitudes (`_solicitar`).
-- Caché en memoria de 300 s por (cadena, consulta); Bravo tiene caché propia.
+- Caché en memoria de 300 s por (cadena, consulta).
 - Normaliza tildes, mayúsculas, fracciones, unidades de masa/volumen y empaques
   (`CAJA/48`, `FARDO DE 24`, `SIX PACK`, etc.).
 - Aplica filtro negativo semántico para evitar falsos positivos (carnes,

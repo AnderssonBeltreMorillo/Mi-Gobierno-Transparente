@@ -11,6 +11,7 @@ sustituir SerpApi por otro proveedor sin cambiar el contrato.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -22,11 +23,12 @@ from decimal import Decimal
 from threading import Lock
 from time import monotonic
 from typing import Final, cast
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote_plus, urljoin, urlparse
 
 import httpx
 import requests
 from bs4 import BeautifulSoup
+from bs4.element import Tag
 
 from .exceptions import ConfiguracionFaltanteError, ErrorDeBusquedaMercado
 from .parsing import (
@@ -37,12 +39,17 @@ from .parsing import (
 )
 
 _URL_SERPAPI: Final[str] = "https://serpapi.com/search.json"
+_URL_PLAZALAMA: Final[str] = "https://plazalama.com.do/search"
 _AGENTE_USUARIO: Final[str] = "MiGobiernoTransparente/0.1 (+https://example.org)"
+_AGENTE_USUARIO_NAVEGADOR: Final[str] = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
+)
 _CADENAS_DOMINIOS: Final[dict[str, str]] = {
     "Nacional": "supermercadosnacional.com",
     "La Sirena": "sirena.do",
     "Jumbo": "jumbo.com.do",
-    "Bravo": "superbravo.com.do",
+    "Plaza Lama": "plazalama.com.do",
 }
 
 # Límites del Escenario A. La proporción se calcula como
@@ -297,19 +304,250 @@ class SerpApiBuscadorSupermercados(BuscadorSupermercados):
         )
 
 
+class BuscadorPlazaLama(BuscadorSupermercados):
+    """Scraper del buscador público de Plaza Lama.
+
+    Consulta ``https://plazalama.com.do/search?name={consulta}`` con
+    ``requests`` y extrae nombre, precio y enlace directo de cada producto con
+    ``BeautifulSoup``. Plaza Lama sirve los resultados desde el buscador de su
+    tienda Next.js, por lo que primero se lee el payload serializado del HTML y,
+    como respaldo, se recorren las tarjetas de producto renderizadas.
+    """
+
+    _PATRON_PRODUCTO_FLIGHT: Final[re.Pattern[str]] = re.compile(
+        r'"name":"((?:[^"\\]|\\.)*)","price":(-?\d+(?:\.\d+)?)'
+        r'[^{}]*?"slug":"((?:[^"\\]|\\.)*)"'
+    )
+    _SELECTORES_TARJETA: Final[tuple[str, ...]] = (
+        "[data-testid$='-productCard']",
+        "[data-testid*='productCard']",
+        "div.card-product-vertical",
+        "div.card-product",
+        "article.product",
+        "li.product-item",
+        "div.product-item",
+        "div[class*='product-card']",
+        "div[class*='productCard']",
+        "div[class*='ProductCard']",
+    )
+
+    def __init__(
+        self,
+        *,
+        session: requests.Session | None = None,
+        timeout: float = 15.0,
+        url_busqueda: str = _URL_PLAZALAMA,
+    ) -> None:
+        if timeout <= 0:
+            raise ValueError("El timeout debe ser mayor que cero.")
+        if not url_busqueda.strip():
+            raise ValueError("La URL de búsqueda de Plaza Lama es obligatoria.")
+        self._session = session or requests.Session()
+        self._session.headers.update(
+            {
+                "User-Agent": _AGENTE_USUARIO_NAVEGADOR,
+                "Accept-Language": "es-DO,es;q=0.9,en;q=0.7",
+            }
+        )
+        self._timeout = timeout
+        self._url_busqueda = url_busqueda.strip()
+
+    def buscar(
+        self,
+        consulta: str,
+        *,
+        limite: int = 20,
+    ) -> list[OfertaSupermercado]:
+        """Devuelve los productos de Plaza Lama para ``consulta``.
+
+        Raises:
+            ValueError: si la consulta está vacía.
+            ErrorDeBusquedaMercado: si la petición HTTP falla.
+        """
+        consulta_limpia = texto_opcional(consulta)
+        if consulta_limpia is None:
+            raise ValueError("La consulta de búsqueda no puede estar vacía.")
+        if limite <= 0:
+            return []
+
+        separador = "&" if "?" in self._url_busqueda else "?"
+        url = f"{self._url_busqueda}{separador}name={quote_plus(consulta_limpia)}"
+        try:
+            respuesta = self._session.get(url, timeout=self._timeout)
+            respuesta.raise_for_status()
+        except requests.RequestException as exc:
+            raise ErrorDeBusquedaMercado(
+                f"No se pudo consultar el buscador de Plaza Lama: {exc}"
+            ) from exc
+
+        ofertas = self._extraer_ofertas(respuesta.text)
+        return ofertas[:limite]
+
+    def close(self) -> None:
+        """Cierra la sesión HTTP usada por el buscador."""
+        cerrar = getattr(self._session, "close", None)
+        if callable(cerrar):
+            cerrar()
+
+    def _extraer_ofertas(self, html: str) -> list[OfertaSupermercado]:
+        sopa = BeautifulSoup(html, "html.parser")
+        ofertas = self._extraer_del_payload(sopa)
+        if not ofertas:
+            ofertas = self._extraer_de_tarjetas(sopa)
+        return self._deduplicar(ofertas)
+
+    def _extraer_del_payload(self, sopa: BeautifulSoup) -> list[OfertaSupermercado]:
+        """Lee los productos serializados en los scripts de Next.js."""
+        fragmentos: list[str] = []
+        for script in sopa.find_all("script"):
+            contenido = script.string or script.get_text()
+            if not contenido or "__next_f" not in contenido:
+                continue
+            for coincidencia in re.finditer(
+                r'self\.__next_f\.push\(\[[^,]*,\s*("(?:[^"\\]|\\.)*")\]\)',
+                contenido,
+                re.DOTALL,
+            ):
+                try:
+                    carga = json.loads(coincidencia.group(1))
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if isinstance(carga, str):
+                    fragmentos.append(carga)
+        payload = "\n".join(fragmentos)
+        if not payload:
+            return []
+
+        ofertas: list[OfertaSupermercado] = []
+        for coincidencia in self._PATRON_PRODUCTO_FLIGHT.finditer(payload):
+            nombre = self._desescapar(coincidencia.group(1))
+            monto = precio_desde_numero(coincidencia.group(2))
+            slug = self._desescapar(coincidencia.group(3)).strip("/")
+            if not nombre or monto is None or monto <= Decimal("0") or not slug:
+                continue
+            ofertas.append(
+                OfertaSupermercado(
+                    producto=nombre,
+                    establecimiento="Plaza Lama",
+                    monto=monto,
+                    moneda="DOP",
+                    url=f"https://plazalama.com.do/{slug}",
+                    fuente="catalogo_directo",
+                )
+            )
+        return ofertas
+
+    def _extraer_de_tarjetas(self, sopa: BeautifulSoup) -> list[OfertaSupermercado]:
+        """Respaldo para variantes del HTML que sí renderizan las tarjetas."""
+        ofertas: list[OfertaSupermercado] = []
+        vistos: set[int] = set()
+        for selector in self._SELECTORES_TARJETA:
+            for tarjeta in sopa.select(selector):
+                if id(tarjeta) in vistos:
+                    continue
+                vistos.add(id(tarjeta))
+                enlace = tarjeta.select_one("a[href]")
+                if enlace is None:
+                    continue
+                nombre = self._nombre_de_tarjeta(tarjeta, enlace)
+                monto = self._precio_de_tarjeta(tarjeta)
+                href = texto_opcional(enlace.get("href"))
+                if not nombre or monto is None or monto <= Decimal("0") or not href:
+                    continue
+                ofertas.append(
+                    OfertaSupermercado(
+                        producto=nombre,
+                        establecimiento="Plaza Lama",
+                        monto=monto,
+                        moneda="DOP",
+                        url=urljoin("https://plazalama.com.do/", href),
+                        fuente="catalogo_directo",
+                    )
+                )
+        return ofertas
+
+    @classmethod
+    def _nombre_de_tarjeta(cls, tarjeta: Tag, enlace: Tag) -> str | None:
+        for selector in (
+            "[itemprop='name']",
+            "h1",
+            "h2",
+            "h3",
+            "h4",
+            "[class*='name']",
+            "[class*='Name']",
+            "[class*='title']",
+            "[class*='Title']",
+        ):
+            nodo = tarjeta.select_one(selector)
+            if nodo is not None:
+                nombre = texto_opcional(nodo.get_text(" ", strip=True))
+                if nombre:
+                    return nombre
+        nombre = texto_opcional(enlace.get_text(" ", strip=True))
+        if nombre:
+            return nombre
+        imagen = tarjeta.select_one("img[alt]")
+        return texto_opcional(imagen.get("alt")) if imagen is not None else None
+
+    @classmethod
+    def _precio_de_tarjeta(cls, tarjeta: Tag) -> Decimal | None:
+        for selector in (
+            "[itemprop='price']",
+            "[data-price-type]",
+            "[class*='price']",
+            "[class*='Price']",
+        ):
+            for nodo in tarjeta.select(selector):
+                texto = nodo.get("content") or nodo.get_text(" ", strip=True)
+                monto = cls._monto_desde_texto(str(texto))
+                if monto is not None:
+                    return monto
+        texto = tarjeta.get_text(" ", strip=True)
+        coincidencia = re.search(r"(?:RD\$|US\$|\$)\s*\d[\d.,]*", texto)
+        return cls._monto_desde_texto(coincidencia.group(0)) if coincidencia else None
+
+    @staticmethod
+    def _monto_desde_texto(texto: str | None) -> Decimal | None:
+        """Convierte un precio con ``$``/``RD$`` en ``Decimal`` en DOP."""
+        limpio = texto_opcional(texto)
+        if limpio is None:
+            return None
+        limpio = re.sub(r"(?:RD|US)\$|\$", " ", limpio, flags=re.IGNORECASE)
+        monto, _ = parsear_precio(limpio, moneda_por_defecto="DOP")
+        return monto if monto is not None and monto > Decimal("0") else None
+
+    @staticmethod
+    def _desescapar(texto: str) -> str:
+        try:
+            valor = json.loads(f'"{texto}"')
+        except (json.JSONDecodeError, TypeError):
+            valor = texto
+        return (texto_opcional(valor) or "") if isinstance(valor, str) else ""
+
+    @staticmethod
+    def _deduplicar(ofertas: list[OfertaSupermercado]) -> list[OfertaSupermercado]:
+        unicas: dict[str, OfertaSupermercado] = {}
+        for oferta in ofertas:
+            clave = oferta.url or f"{oferta.producto}|{oferta.monto}"
+            unicas.setdefault(clave, oferta)
+        return list(unicas.values())
+
+
 class CatalogoDirectoSupermercados:
     """Consulta los catálogos públicos de las cuatro cadenas sin API de pago.
 
     Nacional y Jumbo exponen resultados Magento; Sirena expone el catálogo
-    público VTEX y Bravo publica una tabla con producto/precio. Se aceptan solo
-    coincidencias de nombre y presentación verificables en el contenido oficial.
+    público VTEX y Plaza Lama publica los resultados en su buscador Next.js. Se
+    aceptan solo coincidencias de nombre y presentación verificables en el
+    contenido oficial.
     """
 
     _URLS: Final[dict[str, str]] = {
         "Nacional": "https://supermercadosnacional.com/catalogsearch/result/",
         "La Sirena": "https://nuevo.sirena.do/api/catalog_system/pub/products/search",
         "Jumbo": "https://jumbo.com.do/catalogsearch/result/",
-        "Bravo": "https://superbravo.com.do/productosalcosto/",
+        "Plaza Lama": _URL_PLAZALAMA,
     }
     _UNIDADES: Final[dict[str, tuple[str, Decimal]]] = {
         "g": ("masa", Decimal("1")), "gr": ("masa", Decimal("1")),
@@ -364,11 +602,13 @@ class CatalogoDirectoSupermercados:
         timeout: float = 12.0,
         cache_ttl_segundos: float = 300.0,
         cliente: httpx.Client | None = None,
+        buscador_plaza_lama: BuscadorPlazaLama | None = None,
     ) -> None:
         if timeout <= 0 or cache_ttl_segundos <= 0:
             raise ValueError("El timeout y el TTL de catálogos deben ser positivos.")
         self._timeout = timeout
         self._ttl = cache_ttl_segundos
+        self._plaza_lama = buscador_plaza_lama or BuscadorPlazaLama(timeout=timeout)
         self._cliente = cliente or httpx.Client(
             timeout=httpx.Timeout(timeout),
             follow_redirects=True,
@@ -381,7 +621,6 @@ class CatalogoDirectoSupermercados:
             },
         )
         self._cache: dict[tuple[str, str], tuple[float, list[OfertaSupermercado]]] = {}
-        self._bravo_cache: tuple[float, list[OfertaSupermercado]] | None = None
         self._lock = Lock()
         self._solicitudes_por_host: dict[str, float] = {}
 
@@ -1005,11 +1244,11 @@ class CatalogoDirectoSupermercados:
         try:
             if cadena == "La Sirena":
                 ofertas = self._buscar_sirena(consulta)
-            elif cadena == "Bravo":
-                ofertas = self._buscar_bravo()
+            elif cadena == "Plaza Lama":
+                ofertas = self._buscar_plaza_lama(consulta)
             else:
                 ofertas = self._buscar_magento(cadena, consulta)
-        except (httpx.HTTPError, ValueError, TypeError):
+        except (httpx.HTTPError, ErrorDeBusquedaMercado, ValueError, TypeError):
             ofertas = []
         with self._lock:
             self._cache[clave] = (monotonic(), ofertas)
@@ -1097,31 +1336,11 @@ class CatalogoDirectoSupermercados:
                         ofertas.append(OfertaSupermercado(nombre, "La Sirena", precio, "DOP", url, "catalogo_directo"))
         return ofertas
 
-    def _buscar_bravo(self) -> list[OfertaSupermercado]:
-        url = self._URLS["Bravo"]
-        ahora = monotonic()
-        with self._lock:
-            if self._bravo_cache and ahora - self._bravo_cache[0] < self._ttl:
-                return self._bravo_cache[1]
-        respuesta = self._solicitar(url)
-        sopa = BeautifulSoup(respuesta.text, "html.parser")
-        ofertas: list[OfertaSupermercado] = []
-        for fila in sopa.select("table tr"):
-            celdas = fila.find_all(["td", "th"])
-            if len(celdas) < 2:
-                continue
-            nombre = texto_opcional(celdas[0].get_text(" ", strip=True))
-            precio = self._monto(celdas[-1].get_text(" ", strip=True))
-            enlace = fila.select_one("a[href]")
-            href = texto_opcional(enlace.get("href")) if enlace else None
-            url_producto = urljoin(url, href) if href else url
-            if nombre and precio is not None and url_producto:
-                ofertas.append(OfertaSupermercado(nombre, "Bravo", precio, "DOP", url_producto, "catalogo_directo"))
-        with self._lock:
-            self._bravo_cache = (monotonic(), ofertas)
-        return ofertas
+    def _buscar_plaza_lama(self, consulta: str) -> list[OfertaSupermercado]:
+        return self._plaza_lama.buscar(consulta, limite=50)
 
     def close(self) -> None:
+        self._plaza_lama.close()
         self._cliente.close()
 
     def __enter__(self) -> CatalogoDirectoSupermercados:
@@ -1132,6 +1351,7 @@ class CatalogoDirectoSupermercados:
 
 
 __all__ = [
+    "BuscadorPlazaLama",
     "BuscadorSupermercados",
     "CatalogoDirectoSupermercados",
     "OfertaSupermercado",

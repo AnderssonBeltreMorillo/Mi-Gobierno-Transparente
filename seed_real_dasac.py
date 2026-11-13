@@ -42,7 +42,7 @@ from mi_gobierno_transparente.presentation.routers.licitaciones import listar_li
 ROOT = Path(__file__).resolve().parent
 TODAY = date(2026, 11, 8)
 DGCP = "https://comunidad.comprasdominicana.gob.do/Public/Tendering/OpportunityDetail/Index?asPopupView=true&isModal=true&noticeUID=DO1.NTC.1793806"
-DOMINIOS_CATALOGOS = ("supermercadosnacional.com", "jumbo.com.do", "sirena.do", "superbravo.com.do")
+DOMINIOS_CATALOGOS = ("supermercadosnacional.com", "jumbo.com.do", "sirena.do", "plazalama.com.do")
 
 # (nombre, precio pliego, precio normalizado, descripción, URL catálogo)
 ITEMS = (

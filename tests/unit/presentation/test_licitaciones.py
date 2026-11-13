@@ -31,7 +31,7 @@ def test_auditoria_global_e_interna_son_independientes_y_conservan_ahorros() -> 
 
 
 def test_versiones_incluyen_monto_no_evaluable_y_fuentes_formales() -> None:
-    dominios_oficiales = ("supermercadosnacional.com", "jumbo.com.do", "sirena.do", "superbravo.com.do")
+    dominios_oficiales = ("supermercadosnacional.com", "jumbo.com.do", "sirena.do", "plazalama.com.do")
     for licitacion in listar_licitaciones():
         assert licitacion["monto_no_evaluable"] == "0.00"
         for articulo in licitacion["auditoria_renglones"]:

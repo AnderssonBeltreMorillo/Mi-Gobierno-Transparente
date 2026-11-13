@@ -43,7 +43,7 @@ _FUENTES_CATALOGO: dict[str, tuple[tuple[str, str], ...]] = {
         ("Nacional", "https://supermercadosnacional.com/habichuela-roja-larga-lider-800-gr-2140272"),
         ("Jumbo", "https://jumbo.com.do/supermercado/despensa/arroz-cereales-y-legumbres/habichuelas/habichuela-roja-larga-lider-800-gr-2140272"),
         ("La Sirena", "https://nuevo.sirena.do/supermercado/despensa/arroz-habichuelas-y-otros-granos/habichuelas"),
-        ("Bravo", "https://superbravo.com.do/un-viaje-de-especiales/"),
+        ("Plaza Lama", "https://plazalama.com.do/search?name=habichuela%20roja"),
     ),
     "Leche de coco (10.5 onzas)": (
         ("Jumbo", "https://jumbo.com.do/supermercado/panaderia-y-reposteria/reposteria/leche-y-crema-de-coco/leche-de-coco-la-famosa-10-5-onz-2033831"),
