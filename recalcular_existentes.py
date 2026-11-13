@@ -43,6 +43,8 @@ def _argumentos(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     opciones = _argumentos(argv)
     configuracion = cargar_configuracion()
+    
+    # Este es directamente el cliente de Firestore
     cliente = crear_cliente_firestore(
         project_id=configuracion.project_id,
         ruta_credenciales=configuracion.ruta_credenciales,
@@ -51,11 +53,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     
     procesados = 0
-    db = cliente.db
     
     print("Obteniendo todos los documentos de Firestore...")
-    # Obtener todas las licitaciones guardadas
-    docs = list(db.collection("licitaciones").get())
+    # Usamos el cliente directamente para llamar a la colección
+    docs = list(cliente.collection("licitaciones").get())
     total_docs = len(docs)
     print(f"Se encontraron {total_docs} expedientes en la base de datos.")
     
