@@ -1,0 +1,699 @@
+CONTEXTO TÉCNICO — MI GOBIERNO TRANSPARENTE
+Fecha del análisis: 2026-11-12
+Propósito: documentación del estado actual del repositorio para que otro LLM (Gemini) pueda continuar el desarrollo sin reexplorar todo el código.
+
+===============================================================================
+1. RESUMEN EJECUTIVO
+===============================================================================
+Aplicación de auditoría de compras públicas de República Dominicana. Cruza
+licitaciones de la DGCP con precios de catálogos de supermercados (Nacional,
+Jumbo, La Sirena y Bravo), detecta sobreprecios por renglón y los publica en un
+dashboard React.
+
+Arquitectura:
+- Backend Python 3.11 con FastAPI y arquitectura Onion:
+  domain -> application -> infrastructure/presentation.
+- Sincronización DGCP mediante la API oficial de Datos Abiertos.
+- Persistencia en Firestore (firebase-admin).
+- Scraping directo de catálogos de supermercados con httpx + BeautifulSoup.
+- Evaluación semántica por lotes con Google Gemini (google-genai), con fallback
+  local cuando no hay API key o Gemini falla.
+- Frontend React 19 + TypeScript + Vite + Tailwind CSS 4 + lucide-react.
+- El frontend no accede a Firestore: consume la API FastAPI.
+
+Fuentes de datos del dashboard:
+1. Firestore, colección `licitaciones`, escrita por `dgcp_sync.py`.
+2. Caso DASAC-CCC-LPA-2026-0011 codificado estáticamente en
+   `presentation/routers/licitaciones.py` (dos versiones: original y enmienda).
+   El endpoint `/licitaciones` fusiona ambas fuentes.
+
+===============================================================================
+2. ESTRUCTURA DEL PROYECTO (resumida, sin node_modules ni .venv)
+===============================================================================
+Raíz:
+- `.github/workflows/sync_dgcp.yml` — GitHub Action de sincronización cada 2 h.
+- `src/mi_gobierno_transparente/` — paquete Python principal.
+  - `domain/`
+    - `entities/`: producto, precio_mercado, precio_reportado, evaluacion_precio.
+    - `value_objects/`: dinero, porcentaje, categoria_producto, unidad_medida,
+      nivel_riesgo, umbrales_evaluacion, resultado_evaluacion.
+    - `services/evaluador_precio.py`: cálculo puro de sobreprecio y riesgo.
+    - `exceptions.py`.
+  - `application/`
+    - `ports/`: repositories, reloj, generador_identificadores.
+    - `dto/`: commands, queries, DTOs de producto/precio/evaluación/resumen.
+    - `use_cases/`: registrar producto/precios, evaluar precio, listar,
+      obtener resumen de riesgo, cambiar estado.
+    - `mappers.py`, `exceptions.py`.
+  - `infrastructure/`
+    - `dgcp_sync.py` — orquestador principal del scraping/sincronización.
+    - `dgcp_scraper.py` — cliente API DGCP y scraper HTML genérico.
+    - `market_search_adapter.py` — catálogos directos de supermercados.
+    - `gemini_market_evaluator.py` — evaluación por lotes con Gemini.
+    - `firebase_repository.py` — repositorios Firestore y creación del cliente.
+    - `firestore_documents.py` — serialización/validación de documentos.
+    - `parsing.py`, `html_utils.py`, `reloj_sistema.py`, `generador_uuid.py`,
+      `exceptions.py`.
+  - `presentation/`
+    - `app.py` — factory FastAPI, CORS, montaje del frontend, tarea de sync.
+    - `config.py` — variables de entorno y credenciales.
+    - `dependencies.py` — composition root y dependencias FastAPI.
+    - `cache.py` — caché TTL stale-while-revalidate.
+    - `errors.py`, `schemas.py`.
+    - `routers/`: productos, evaluaciones, resumen_riesgo, licitaciones.
+- `frontend/`
+  - `src/App.tsx` — dashboard principal y vista de detalle.
+  - `src/types.ts` — interfaces TypeScript.
+  - `src/lib/`: api.ts, impactoFinanciero.ts, formato.ts, fuentes.ts,
+    comparaciones.ts.
+  - `src/components/`: Header, Filtros, ResumenCaso, ResumenKpis,
+    ImpactoFinanciero, TablaAuditoriaVersion, TarjetaProducto,
+    TablaComparacion, EtiquetaRiesgo, MapaRD, EstadoCarga,
+    DetalleErrorBoundary.
+  - `vite.config.ts`, `package.json`, `tsconfig.json`, `index.html`.
+- `tests/unit/`: pruebas de domain, application, infrastructure y presentation.
+- `data/DASAC-CCC-LPA-2026-0011/`: PDFs/DOCX del expediente real (publicaciones,
+  adendas, mensajes, adjuntos).
+- Scripts raíz:
+  - `sync_licitaciones_dgcp.py` — entrypoint de sincronización.
+  - `recalcular_existentes.py` — recalcula expedientes ya guardados.
+  - `seed_real_dasac.py` — carga el expediente real DASAC en Firestore.
+  - `seed_demo_habichuelas.py` — datos de demostración.
+- Configuración/despliegue: `pyproject.toml`, `requirements.txt`, `render.yaml`,
+  `build_render.sh`, `firebase_credentials.json` (credencial local, no versionar).
+
+===============================================================================
+3. BACKEND: FLUJO DE dgcp_sync.py
+===============================================================================
+Entrypoint: `sync_licitaciones_dgcp.py` importa `main` y `evaluar_renglones`
+desde `infrastructure.dgcp_sync`.
+
+3.1. Constantes y versión del motor
+- `_MOTOR_VERSION = "2026-11-escenarios-abc"`.
+- `_PALABRAS_PROCESO`: alimento, despensa, comedor, raciones, aseo, limpieza,
+  higiénico, higiene, supermercado, comestible, insumo alimenticio, víveres,
+  canasta, productos básicos, material de limpieza, productos de aseo,
+  artículos de higiene, suministros de limpieza.
+- `_PALABRAS_ASEO`: cloro, detergente, desinfectante, jabón, papel higiénico,
+  escoba, trapeador, limpiador, fundas, bolsas para basura.
+- Host oficial de fichas: `comunidad.comprasdominicana.gob.do`.
+- API oficial: `https://datosabiertos.dgcp.gob.do/api-dgcp/v1`.
+
+3.2. `main()` — ciclo de una ejecución
+1. Calcula ventana: `hoy - DGCP_LOOKBACK_DAYS` (default 120 días).
+2. Lee `DGCP_MAX_PAGES` (default 20) y `DGCP_MAX_PROCESSES` (default 50 en
+   código; `render.yaml` lo fuerza a 1; el README menciona 3, está desactualizado).
+3. Crea `DgcpOpenDataClient`.
+4. Lee filtros manuales de `DGCP_PROCESS_URLS`.
+5. Descubre procesos (`_descubrir`).
+6. Carga configuración y crea cliente Firestore.
+7. Abre `CatalogoDirectoSupermercados` como context manager.
+8. Obtiene procesos nuevos (`_procesos_nuevos`).
+9. Para cada proceso nuevo:
+   - Aplica filtro de rubro con `palabras_clave_permitidas` sobre
+     título + descripción + objeto del proceso, en minúsculas.
+   - Si no cumple, lo guarda en `licitaciones_descartadas` con motivo
+     "No cumple filtro de rubro" y continúa.
+   - Si cumple, llama a `_procesar_proceso`.
+   - Se detiene al llegar a `max_procesos` sincronizados.
+10. Si sincronizó al menos uno, termina con código 0.
+11. Si no sincronizó ninguno (todos descartados), busca un pendiente de
+    recálculo con `_siguiente_pendiente` y recalcula un solo documento.
+12. Si no hay nada, imprime que esperará al siguiente ciclo de 2 horas.
+
+3.3. `_descubrir()` — descubrimiento y filtros de entrada
+- Si `DGCP_PROCESS_URLS` contiene códigos, busca cada código con
+  `api.buscar_procesos(..., max_paginas=1, codigo=codigo)`.
+- Si contiene URLs, valida que sean http/https, que el host sea
+  `comunidad.comprasdominicana.gob.do` y que tengan `noticeUID`; luego filtra
+  los procesos descubiertos por ese UID en su URL.
+- Sin filtros manuales, recorre las páginas recientes de `/procesos`.
+- Deduplica por `codigo_proceso`.
+- Solo conserva procesos cuyo título/descripción/objeto contenga alguna
+  `_PALABRAS_PROCESO`, comparando texto normalizado sin tildes y en casefold.
+
+3.4. Filtro de artículos objetivo
+`_articulo_objetivo(articulo)` acepta un renglón si:
+- La `familia_unspsc` (solo dígitos) empieza por "50" o "47"; o
+- La descripción contiene alguna `_PALABRAS_ASEO`.
+Se evalúa `descripcion_usuario` + `descripcion_articulo`.
+
+3.5. `_procesar_proceso()`
+- Obtiene todos los renglones con `api.obtener_articulos(codigo)`.
+- Si ningún renglón es objetivo, guarda el proceso en
+  `licitaciones_descartadas` con motivo
+  "Sin artículos auditables en supermercado" y retorna False.
+- Si hay renglones objetivo, llama a `evaluar_renglones`, guarda con
+  `_guardar_agrupado` y retorna True.
+
+3.6. `evaluar_renglones()` — evaluación de precios
+Parámetros relevantes:
+- `filtrar_objetivos=True` por defecto; en recálculos se pasa False.
+- `monto_total_conocido` permite conservar el monto global original al
+  recalcular.
+
+Fases:
+1. Intenta crear `GeminiMarketEvaluator`. Si no hay `GEMINI_API_KEY`, usa
+   fallback local (oferta mínima) y avisa por consola.
+2. Recorre los artículos objetivo y, para cada uno, consulta:
+   `buscador.buscar_ofertas_cadenas_verificadas(descripcion_usuario, limite=10)`.
+3. Agrupa los artículos con candidatos en bloques de 15.
+4. Por cada bloque envía a Gemini un JSON con:
+   `id_articulo`, `producto_dgcp`, `unidad_dgcp` y `candidatos_mercado`
+   (id, producto_catalogo, establecimiento, precio, url).
+5. Gemini devuelve por artículo: `id_oferta_elegida`,
+   `factor_multiplicador` y `razonamiento`.
+6. `GeminiMarketEvaluator` transforma el candidato elegido en
+   `OfertaSupermercado` con `monto = precio_catalogo * factor`.
+7. Si Gemini no devuelve resultado para un artículo, se usa
+   `seleccionar_oferta_minima` sobre sus ofertas crudas.
+8. Calcula por fila:
+   - `diferencia = precio_unitario_estimado - precio_mercado`.
+   - `porcentaje = diferencia / precio_mercado * 100` solo si diferencia > 0.
+   - `ALTO_RIESGO` si porcentaje > 15; `ALERTA_AMARILLA` si porcentaje > 0;
+     `PRECIO_JUSTO` en otro caso.
+   - `total_mercado = precio_mercado * cantidad`.
+9. Acumula `monto_total` (o usa `monto_total_conocido` si es > 0),
+   `monto_evaluable`, `monto_mercado`.
+10. Calcula `diferencia_global`, `sobreprecio_global` y estado global:
+    "Justa" si `sobreprecio_global <= 15`, "Sobrevalorada" si hay filas y
+    supera 15, "Irregular" si no hay filas evaluadas.
+11. Devuelve `{version, renglones_sin_referencia}`.
+12. Ante una excepción crítica devuelve una versión de respaldo con estado
+    "Error" y `auditoria_renglones` vacío.
+
+Fórmulas críticas del motor DGCP:
+```text
+diferencia          = precio_licitado_unitario - precio_mercado_unitario
+sobreprecio_%       = (diferencia / precio_mercado_unitario) * 100   si diferencia > 0
+total_mercado       = precio_mercado_unitario * cantidad
+monto_evaluable     = suma(precio_total_estimado de renglones evaluables)
+monto_mercado       = suma(total_mercado de renglones evaluables)
+diferencia_global   = monto_evaluable - monto_mercado
+sobreprecio_global% = (diferencia_global / monto_mercado) * 100      si diferencia_global > 0
+monto_no_evaluable  = monto_total - monto_evaluable
+```
+Nota: este motor usa >0 % como alerta amarilla. No aplica la banda de
+tolerancia del 1 % que sí existe en `domain/value_objects/umbrales_evaluacion.py`.
+
+3.7. Rate limit y manejo de errores de Gemini
+Archivo: `infrastructure/gemini_market_evaluator.py`.
+- Modelo: `gemini-3.6-flash`.
+- `response_mime_type="application/json"`, `temperature=0.0`.
+- Lotes de 15 artículos (`TAMANO_BLOQUE = 15`).
+- Después de cada bloque se ejecuta `time.sleep(60)`, incluso después del
+  último bloque. No hay token bucket ni control de RPM aparte de esta pausa.
+- Reintentos: máximo 3 (`max_reintentos=3`).
+- Solo reintenta errores `APIError` con código 429 o 503, esperando 15 s.
+- Otros errores de API o excepciones inesperadas devuelven `{}` y el flujo
+  continúa con fallback local.
+- El prompt instruye identidad de producto, proporción lógica, corrección de
+  errores de digitación y factor de empaque.
+- La respuesta se valida contra los candidatos originales por índice; un
+  `id_oferta_elegida` inválido o nulo se ignora.
+
+3.8. Scraping de supermercados
+Archivo principal: `infrastructure/market_search_adapter.py`.
+
+`CatalogoDirectoSupermercados` consulta catálogos públicos sin API de pago:
+- Nacional: Magento HTML `https://supermercadosnacional.com/catalogsearch/result/`.
+- Jumbo: Magento HTML `https://jumbo.com.do/catalogsearch/result/`.
+- La Sirena: API VTEX `https://nuevo.sirena.do/api/catalog_system/pub/products/search`.
+- Bravo: tabla pública `https://superbravo.com.do/productosalcosto/`.
+
+Comportamiento:
+- Rate limit por host: mínimo 0.25 s entre solicitudes (`_solicitar`).
+- Caché en memoria de 300 s por (cadena, consulta); Bravo tiene caché propia.
+- Normaliza tildes, mayúsculas, fracciones, unidades de masa/volumen y empaques
+  (`CAJA/48`, `FARDO DE 24`, `SIX PACK`, etc.).
+- Aplica filtro negativo semántico para evitar falsos positivos (carnes,
+  snacks, bebidas, adobos, etc.).
+- Escenarios de comparación:
+  A/B: ajusta precio por proporción de tamaño/peso/volumen y empaques.
+  C: convierte precio por libra a precio por unidad agrícola usando peso
+  aproximado o pesos promedio (sandía 10 lb, melón 5 lb, piña 2 lb, auyama 5 lb,
+  repollo 4 lb).
+- `_evaluar_presentacion` devuelve precio normalizado y explicación de
+  equivalencia.
+- `buscar_para_renglon` busca en las cuatro cadenas, normaliza cada oferta y
+  conserva la más barata por cadena; luego ordena por monto.
+- `buscar_ofertas_cadenas_verificadas` es un wrapper compatible que usa
+  `buscar_para_renglon` con `unidad_medida="Unidad"`.
+
+`SerpApiBuscadorSupermercados` existe como implementación legacy basada en
+SerpApi/Google Shopping, pero el sincronizador usa el catálogo directo.
+
+`dgcp_scraper.py` contiene:
+- `DgcpScraper`: scraper HTML genérico con selectores CSS configurables. No es
+  el usado por `dgcp_sync.py`; se conserva para pruebas/otros portales.
+- `DgcpOpenDataClient`: cliente real de la API DGCP. Pagina `/procesos` y
+  `/procesos/articulos`, usa `page`, `limit` (100 por defecto, máximo 1000),
+  timeout 20 s y detecta `hasError`/`payload.content`.
+
+===============================================================================
+4. FIRESTORE: DOCUMENTOS QUE GUARDA dgcp_sync.py
+===============================================================================
+4.1. Colección `licitaciones`
+ID del documento: `codigo_proceso` (ej. "DASAC-CCC-LPA-2026-0011").
+Escritura: `DocumentReference.set(...)` completo (sobrescribe el documento,
+no usa merge).
+
+Esquema:
+```text
+licitaciones/{codigo_proceso}
+{
+  codigo: string,
+  version_original: Version,
+  versiones: Version[],
+  proceso_dgcp: {
+    codigo_proceso: string,
+    titulo: string,
+    descripcion: string,
+    objeto_proceso: string,
+    unidad_compra: string,
+    fecha_publicacion: string,
+    estado_proceso: string,
+    url: string,
+    ...campos crudos devueltos por la API DGCP
+  },
+  renglones_sin_referencia: ArticuloDGCP[],
+  sincronizado_en: string ISO-8601 UTC,
+  motor_version: "2026-11-escenarios-abc",
+  fuente_datos: "API oficial de Datos Abiertos DGCP",
+
+  // Solo si el documento fue recalculado:
+  recalculado_en?: string ISO-8601 UTC
+}
+
+Version {
+  id_version: "auto-{codigo_proceso}",
+  version: number,
+  codigo: string,
+  titulo: "{codigo} (Evaluación automática DGCP)",
+  institucion: string,
+  fecha_publicacion: string,
+  monto_total: string decimal con 2 decimales,
+  monto_mercado: string decimal con 2 decimales,
+  monto_no_evaluable: string decimal con 2 decimales,
+  diferencia_global: string decimal con 2 decimales,
+  sobreprecio: string decimal con 2 decimales,
+  estado: "Justa" | "Sobrevalorada" | "Irregular",
+  estado_proceso: string,
+  articulos_sobreprecio: number,
+  articulos_alerta_amarilla: number,
+  articulos_alto_riesgo: number,
+  alerta_interna: string,
+  nota_metodologica: string,
+  enlace_dgcp: string,
+  motor_version: string,
+  auditoria_renglones: FilaAuditoria[]
+}
+
+FilaAuditoria {
+  producto: string,
+  cantidad: number,
+  precio_licitado: string decimal,
+  precio_mercado: string decimal,
+  diferencia: string decimal,
+  sobreprecio: string decimal,
+  estado: "PRECIO_JUSTO" | "ALERTA_AMARILLA" | "ALTO_RIESGO",
+  presentacion_comercial: string,
+  equivalencia: string,
+  fuente_mercado: string,   // "Establecimiento | URL"
+  fuentes_mercado: [{ nombre: string, url: string }]
+}
+```
+Detalles de versionado en `_guardar_agrupado`:
+- Lee el documento existente.
+- Conserva las versiones previas, elimina la que tenga el mismo `id_version`
+  y agrega la nueva.
+- Como `id_version` es siempre `auto-{codigo}`, una nueva sincronización del
+  mismo proceso reemplaza la versión automática existente en lugar de acumular.
+- `version_original` se conserva si ya era un mapa con un `id_version`
+  distinto; si no, se asigna la versión actual.
+- `renglones_sin_referencia` guarda los artículos objetivo para los que no se
+  encontró precio de supermercado.
+
+4.2. Colección `licitaciones_descartadas` (nueva)
+ID del documento: `codigo_proceso`.
+Propósito: caché negativa permanente para evitar reprocesar cada 2 horas
+procesos que no pertenecen al rubro o que no tienen artículos auditables.
+
+Esquema:
+```text
+licitaciones_descartadas/{codigo_proceso}
+{
+  codigo: string,
+  motivo: "No cumple filtro de rubro"
+        | "Sin artículos auditables en supermercado"
+}
+```
+Características:
+- No guarda timestamp.
+- No se elimina automáticamente; si un proceso descartado debe reevaluarse,
+  hay que borrar su documento manualmente.
+- `_procesos_nuevos` verifica que el código no exista ni en `licitaciones` ni
+  en `licitaciones_descartadas`.
+
+4.3. Otras colecciones (modelo de dominio)
+- `productos`: id, nombre, nombre_normalizado, categoria, unidad_medida,
+  marca, descripcion, activo.
+- `precios_mercado`: id, producto_id, precio {monto, moneda}, fuente,
+  fecha_registro, vigente.
+- `precios_reportados`: id, producto_id, precio {monto, moneda},
+  establecimiento, fecha_reporte, distrito, reportado_por.
+- `evaluaciones`: id, producto_id, precio_reportado_id, precio_mercado_id,
+  resultado, evaluado_en, version_regla, observacion.
+Los importes se guardan como texto decimal, no float. Las fechas sin hora se
+guardan como ISO `YYYY-MM-DD`; los datetime como timestamp nativo.
+
+4.4. Recálculo de documentos existentes
+`recalcular_documento`:
+- Reconstruye artículos desde `auditoria_renglones` (producto, unidad, cantidad,
+  precio licitado, precio total).
+- Llama a `evaluar_renglones` con `filtrar_objetivos=False` y conserva el
+  `monto_total` original si está disponible.
+- Fusiona solo campos calculados: montos, diferencia, sobreprecio, estado,
+  conteos, alerta, auditoría y motor_version.
+- Conserva metadatos del proceso y alias.
+- Añade `recalculado_en`.
+- `--dry-run` en `recalcular_existentes.py` evita escribir.
+
+`_siguiente_pendiente` devuelve el primer documento de `licitaciones` cuyo
+`motor_version` sea distinto al actual. El ciclo automático recalcula como
+máximo uno por ejecución cuando no hay licitaciones nuevas válidas.
+
+===============================================================================
+5. CÁLCULOS FINANCIEROS DEL FRONTEND
+===============================================================================
+Archivo completo actual: `frontend/src/lib/impactoFinanciero.ts`.
+
+```typescript
+import type { ArticuloAuditoria, Licitacion } from "../types";
+
+export interface ImpactoFinanciero {
+  montoTotal: number;
+  montoNoEvaluable: number;
+  montoEvaluable: number;
+  porcentajeMedible: number;
+  montoMercado: number;
+  excedenteBruto: number;
+  sobrevalorado: number;
+  irregular: number;
+}
+
+function totalExcedente(articulos: ArticuloAuditoria[], estado: ArticuloAuditoria["estado"]): number {
+  return (Array.isArray(articulos) ? articulos : []).filter(Boolean)
+    .filter((articulo) => articulo.estado === estado && Number(articulo.diferencia) > 0)
+    .reduce((total, articulo) => total + Number(articulo.diferencia) * articulo.cantidad, 0);
+}
+
+export function calcularImpactoFinanciero(licitacion: Licitacion): ImpactoFinanciero {
+  const articulos = Array.isArray(licitacion?.auditoria_renglones) ? licitacion.auditoria_renglones : [];
+  const sobrevalorado = totalExcedente(articulos, "ALTO_RIESGO");
+  const irregular = totalExcedente(articulos, "ALERTA_AMARILLA");
+  const excedenteBruto = sobrevalorado + irregular;
+  const montoTotal = Number(licitacion?.monto_total) || 0;
+  const montoNoEvaluable = Number(licitacion.monto_no_evaluable ?? "0");
+  const montoEvaluable = montoTotal - montoNoEvaluable;
+
+  return {
+    montoTotal,
+    montoNoEvaluable,
+    montoEvaluable,
+    porcentajeMedible: montoTotal > 0 ? montoEvaluable / montoTotal * 100 : 0,
+    montoMercado: Number(licitacion?.monto_mercado) || 0,
+    excedenteBruto,
+    sobrevalorado,
+    irregular,
+  };
+}
+
+export function formatearRD(value: number): string {
+  return `RD$ ${value.toLocaleString("es-DO", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+```
+
+Fórmulas efectivas:
+```text
+montoEvaluable     = monto_total - monto_no_evaluable
+porcentajeMedible  = montoEvaluable / monto_total * 100
+excedentePorEstado = Σ (diferencia * cantidad) para filas del estado
+                     donde diferencia > 0
+excedenteBruto     = sobrevalorado + irregular
+```
+Importante: el frontend solo suma diferencias positivas por renglón; no
+compensa renglones con diferencia negativa. Por eso `excedenteBruto` puede no
+coincidir exactamente con `diferencia_global` del backend, que usa
+`montoEvaluable - montoMercado`.
+
+Interfaces TypeScript principales (`frontend/src/types.ts`):
+
+```typescript
+export interface ArticuloAuditoria {
+  producto: string;
+  cantidad: number;
+  precio_licitado: string;
+  precio_mercado: string;
+  diferencia: string;
+  sobreprecio: string;
+  estado: "PRECIO_JUSTO" | "ALERTA_AMARILLA" | "ALTO_RIESGO";
+  presentacion_comercial: string;
+  equivalencia?: string;
+  fuente_mercado: string;
+  fuentes_mercado?: FuenteCatalogo[];
+}
+
+export interface Licitacion {
+  id_version: string;
+  version: number;
+  codigo: string;
+  titulo: string;
+  institucion: string;
+  fecha_publicacion: string;
+  monto_total: string;
+  monto_mercado: string;
+  monto_no_evaluable?: string;
+  diferencia_global: string;
+  sobreprecio: string;
+  estado: "Justa" | "Irregular" | "Sobrevalorada";
+  estado_proceso: string;
+  articulos_sobreprecio: number;
+  articulos_alerta_amarilla: number;
+  articulos_alto_riesgo: number;
+  alerta_interna: string;
+  nota_metodologica: string;
+  enlace_dgcp: string;
+  auditoria_renglones: ArticuloAuditoria[];
+}
+```
+
+Interfaces auxiliares relevantes:
+- `FuenteCatalogo { nombre: string; url: string }`.
+- `LicitacionAgrupada { original: Licitacion; versiones: Licitacion[] }`.
+- `DashboardData { productos, evaluaciones, resumen, licitaciones }`.
+- `NivelRiesgo = "precio_justo" | "alerta_amarilla" | "alto_riesgo"`.
+- `FiltroRiesgo = "todos" | NivelRiesgo`.
+
+===============================================================================
+6. FRONTEND REACT
+===============================================================================
+Stack: React 19, TypeScript, Vite 8, Tailwind CSS 4, lucide-react, fuente
+Manrope variable. Scripts: `npm run dev`, `npm run build`
+(`tsc --noEmit && vite build`), `npm run preview`.
+
+6.1. Capa de datos
+`src/lib/api.ts`:
+- `API_URL = VITE_API_URL` sin barras finales; si no se define, cadena vacía
+  (mismo origen).
+- `obtenerDashboard(signal, forceRefresh)` hace `Promise.all` de:
+  `/productos`, `/evaluaciones`, `/resumen-riesgo` y `/licitaciones`.
+- Añade `force_refresh=true` cuando se solicita recarga.
+- Errores HTTP se convierten en `Error` con el mensaje del backend.
+
+Backend relevante:
+- `GET /licitaciones` fusiona las versiones estáticas DASAC con los documentos
+  de Firestore. Por cada documento lee `versiones` y `version_original`, y
+  devuelve una lista plana de versiones.
+- Si Firestore falla, devuelve solo el caso DASAC estático.
+- Los endpoints de lectura usan caché en memoria de 5 minutos con
+  stale-while-revalidate; `force_refresh` real se acepta como máximo una vez
+  cada 60 s globalmente.
+
+6.2. Dashboard principal (`src/App.tsx`)
+Estado:
+- `datos: DashboardData | null`
+- `cargando`, `error`
+- `filtro: FiltroRiesgo`
+- `busqueda: string`
+- `detalle: boolean`
+- `versionActiva: string`
+
+Flujo:
+1. Al montar, llama `obtenerDashboard` con `AbortController`.
+2. Normaliza defensivamente cada licitación con `normalizarLicitacion`:
+   tolera campos legacy (`codigo_proceso`, `renglones`, `productos`,
+   `nivel_riesgo`, etc.), convierte números y strings, y garantiza estados
+   válidos.
+3. Agrupa por `codigo` con `agruparLicitaciones`; `original` es la versión de
+   menor número y `versiones` queda ordenado.
+4. La búsqueda principal filtra grupos por código, título o fecha.
+5. `licitacion` activa se busca por `id_version`; si no existe, usa el original
+   del primer grupo.
+6. Calcula conteos por estado y un `ResumenRiesgo` local.
+7. La "última actualización" se deriva del máximo `evaluado_en` de las
+   evaluaciones.
+
+Vista de listado:
+- Hero institucional.
+- Panel "Licitaciones completas analizadas" con buscador.
+- Cuatro KPIs: licitaciones analizadas, monto global en margen, con renglones
+  irregulares, con renglones sobrevalorados.
+- `ResumenImpactoLicitaciones` con el total analizado, monto de mercado y
+  sobreprecio bruto; usa solo el Pliego Original por código para no duplicar
+  versiones. Además compara específicamente original vs enmienda del expediente
+  DASAC-CCC-LPA-2026-0011.
+- Tarjetas de licitación (`TarjetaLicitacion`, definida dentro de App.tsx):
+  título, institución, fecha, estado, montos, `ImpactoFinancieroPanel` compacto,
+  nota metodológica e historial de versiones.
+- Al hacer clic en una versión se abre el detalle.
+
+Vista de detalle:
+- Botón volver y tabs por versión del mismo código.
+- Cabecera con título, estado del proceso, fecha y enlace oficial DGCP.
+- `ResumenCaso`: dictamen global, alerta interna, nota metodológica, panel de
+  impacto financiero, productos/evaluaciones, última actualización, índice de
+  alto riesgo y gráfico circular SVG.
+- `ResumenKpis`: total, justas, irregulares, sobrevaloradas.
+- `Filtros`: Todos / Justos / Irregulares / Sobrevalorados + búsqueda.
+- `TablaAuditoriaVersion`: tabla por renglón ordenada por riesgo y sobreprecio,
+  con montos unitarios y totales, presentación, equivalencia, etiqueta y
+  fuentes.
+- `DetalleErrorBoundary` protege la vista de detalle y permite volver.
+
+6.3. `ImpactoFinanciero.tsx`
+- `ImpactoFinancieroPanel({ licitacion, compacto })` recibe la licitación ya
+  cargada desde la API/Firestore (no consulta la base directamente).
+- Llama `calcularImpactoFinanciero(licitacion)` y muestra cuatro métricas:
+  monto total licitado, monto evaluable, monto de mercado del catálogo y
+  sobreprecio total bruto.
+- En la cuarta métrica desglosa sobrevalorado e irregular.
+- `ResumenImpactoLicitaciones({ licitaciones })`:
+  - Deduplica por código tomando la versión de menor número.
+  - Suma montos con `calcularImpactoFinanciero`.
+  - Muestra total analizado, mercado y sobreprecio bruto.
+  - Compara Pliego Original vs Enmienda del código DASAC hardcodeado.
+
+6.4. Componentes
+- `Header`: marca, estado "Scraper DGCP & Supermercados: Activo", botón
+  Actualizar.
+- `EstadoCarga` / `EstadoError`: pantallas de carga y error con reintento.
+- `Filtros`: botones de riesgo con conteos y búsqueda por producto/marca.
+- `ResumenCaso`: dictamen y gráfico circular de riesgo.
+- `ResumenKpis`: tarjetas KPI.
+- `ImpactoFinanciero`: panel y resumen financiero.
+- `TablaAuditoriaVersion`: tabla principal de auditoría por renglón.
+- `EtiquetaRiesgo`: etiqueta visual Justo/Irregular/Sobrevalorado.
+- `MapaRD`: silueta SVG decorativa de República Dominicana.
+- `DetalleErrorBoundary`: captura errores de la vista de detalle.
+- `TarjetaProducto`, `TablaComparacion` y `lib/comparaciones.ts` existen pero
+  no se importan en `App.tsx` actual; son legado del dashboard de productos.
+
+6.5. Formato y fuentes
+- `lib/formato.ts`: moneda es-DO, porcentaje, fecha, etiquetas de unidad y
+  categoría, `aNumero`.
+- `lib/fuentes.ts`: URLs de DGCP y de las cuatro cadenas; mapa hardcodeado de
+  fuentes por nombre de producto para el caso DASAC.
+- `lib/impactoFinanciero.ts`: cálculo y formato RD$.
+
+===============================================================================
+7. INFRAESTRUCTURA
+===============================================================================
+7.1. GitHub Actions: `.github/workflows/sync_dgcp.yml`
+- Nombre: "Sincronizar Licitaciones DGCP".
+- Disparadores:
+  - `schedule: cron '0 */2 * * *'` (cada 2 horas, minuto 0).
+  - `workflow_dispatch` (ejecución manual).
+- Runner: `ubuntu-latest`.
+- Pasos:
+  1. `actions/checkout@v4`.
+  2. `actions/setup-python@v5` con Python 3.11.
+  3. `pip install -r requirements.txt`.
+  4. `python sync_licitaciones_dgcp.py`.
+- Variables/secretos del paso de sincronización:
+  - `FIREBASE_CREDENTIALS_JSON` desde secrets.
+  - `GEMINI_API_KEY` desde secrets.
+  - `PYTHONPATH=src`.
+- No define `DGCP_LOOKBACK_DAYS`, `DGCP_MAX_PAGES` ni `DGCP_MAX_PROCESSES`, por
+  lo que usa los defaults del código: 120 días, 20 páginas y 50 procesos.
+- No hay caché de pip ni timeout explícito.
+
+7.2. Render
+- `render.yaml`: servicio web Python, build con `build_render.sh`
+  (`pip install .` + `npm ci` + `npm run build`), start con uvicorn.
+- Variables: `PYTHON_VERSION=3.11.11`, `CORS_ORIGINS`, credenciales Firebase,
+  `ENABLE_BACKGROUND_SYNC=true`, `DGCP_MAX_PROCESSES=1`.
+- `presentation/app.py`: si `ENABLE_BACKGROUND_SYNC` es verdadero, lanza una
+  tarea asyncio que ejecuta `dgcp_sync.main()` cada 7200 s.
+- El frontend compilado se sirve desde FastAPI si existe `frontend/dist`.
+
+===============================================================================
+8. VARIABLES DE ENTORNO Y COMANDOS
+===============================================================================
+Backend:
+- `GEMINI_API_KEY`: clave de Gemini; si falta, se usa fallback local.
+- `DGCP_PROCESS_URLS`: códigos o URLs oficiales separados por coma; vacío activa
+  descubrimiento automático.
+- `DGCP_LOOKBACK_DAYS` (120), `DGCP_MAX_PAGES` (20),
+  `DGCP_MAX_PROCESSES` (50 en código).
+- `FIREBASE_CREDENTIALS`, `GOOGLE_APPLICATION_CREDENTIALS`,
+  `FIREBASE_CREDENTIALS_JSON` (JSON o Base64), `FIREBASE_PROJECT_ID`,
+  `FIRESTORE_EMULATOR_HOST`.
+- `ENABLE_BACKGROUND_SYNC`, `CORS_ORIGINS`, `PORT`.
+
+Frontend:
+- `VITE_API_URL`: URL de la API; vacío = mismo origen.
+
+Comandos útiles:
+- `python sync_licitaciones_dgcp.py`
+- `python recalcular_existentes.py [--dry-run] [--codigos ...]`
+- `python seed_real_dasac.py`
+- `python seed_demo_habichuelas.py`
+- `uvicorn mi_gobierno_transparente.presentation.app:app --reload --port 8000`
+- `python -m pytest` / `python -m unittest discover -s tests -t . -v`
+- `python -m mypy src`
+- `cd frontend; npm install; npm run dev; npm run build`
+
+===============================================================================
+9. OBSERVACIONES PARA EL PRÓXIMO LLM
+===============================================================================
+1. Hay dos fuentes de licitaciones: Firestore y el caso DASAC estático en
+   `presentation/routers/licitaciones.py`. No eliminar la fusión sin migrar el
+   caso estático.
+2. El motor DGCP clasifica cualquier sobreprecio positivo como
+   `ALERTA_AMARILLA`; el dominio clásico usa una banda de tolerancia del 1 %.
+   No unificar ambos comportamientos sin decisión explícita.
+3. `licitaciones_descartadas` es una caché negativa permanente sin timestamp.
+   Para reintentar un proceso hay que borrar su documento.
+4. `_guardar_agrupado` usa `set()` completo: sobrescribe el documento. Si se
+   añaden campos nuevos, deben incluirse en esa escritura para no perderlos.
+5. `id_version` automático es siempre `auto-{codigo}`; por eso una nueva corrida
+   reemplaza la versión automática previa. El versionado histórico real solo
+   ocurre si cambia el `id_version`.
+6. `monto_no_evaluable` puede faltar en documentos antiguos; el frontend lo
+   trata como 0.
+7. `excedenteBruto` del frontend suma solo diferencias positivas por renglón;
+   `diferencia_global` del backend usa `montoEvaluable - montoMercado`. Pueden
+   discrepar; no asumir equivalencia exacta.
+8. El estado de respaldo del backend es "Error" si falla la evaluación, pero el
+   tipo `Licitacion` solo admite "Justa" | "Irregular" | "Sobrevalorada"; el
+   normalizador del frontend convierte cualquier otro valor en "Irregular".
+9. `DGCP_MAX_PROCESSES` aparece como 50 en el código y 3 en el README; Render
+   lo fija en 1. Verificar antes de cambiar la documentación.
+10. `TarjetaProducto`, `TablaComparacion` y `construirComparaciones` son legado
+    no usado por el dashboard actual.
+11. El prompt de Gemini y el modelo `gemini-3.6-flash` están hardcodeados en
+    `gemini_market_evaluator.py`; el rate limit depende de pausas fijas, no de
+    cuotas dinámicas.
+12. El frontend compilado se sirve desde el mismo proceso FastAPI en producción;
+    `VITE_API_URL` vacío es el comportamiento esperado en ese despliegue.

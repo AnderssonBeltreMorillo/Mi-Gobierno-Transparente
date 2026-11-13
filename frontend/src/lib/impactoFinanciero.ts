@@ -9,6 +9,8 @@ export interface ImpactoFinanciero {
   excedenteBruto: number;
   sobrevalorado: number;
   irregular: number;
+  ahorroEstimado: number;
+  diferenciaNeta: number;
 }
 
 function totalExcedente(articulos: ArticuloAuditoria[], estado: ArticuloAuditoria["estado"]): number {
@@ -17,24 +19,40 @@ function totalExcedente(articulos: ArticuloAuditoria[], estado: ArticuloAuditori
     .reduce((total, articulo) => total + Number(articulo.diferencia) * articulo.cantidad, 0);
 }
 
+// Nueva función para sumar renglones donde el Estado compró más barato que en el súper
+function totalAhorro(articulos: ArticuloAuditoria[]): number {
+  return (Array.isArray(articulos) ? articulos : []).filter(Boolean)
+    .filter((articulo) => Number(articulo.diferencia) < 0)
+    .reduce((total, articulo) => total + Math.abs(Number(articulo.diferencia)) * articulo.cantidad, 0);
+}
+
 export function calcularImpactoFinanciero(licitacion: Licitacion): ImpactoFinanciero {
   const articulos = Array.isArray(licitacion?.auditoria_renglones) ? licitacion.auditoria_renglones : [];
+  
   const sobrevalorado = totalExcedente(articulos, "ALTO_RIESGO");
   const irregular = totalExcedente(articulos, "ALERTA_AMARILLA");
   const excedenteBruto = sobrevalorado + irregular;
+  const ahorroEstimado = totalAhorro(articulos);
+  
   const montoTotal = Number(licitacion?.monto_total) || 0;
   const montoNoEvaluable = Number(licitacion.monto_no_evaluable ?? "0");
   const montoEvaluable = montoTotal - montoNoEvaluable;
+  const montoMercado = Number(licitacion?.monto_mercado) || 0;
+  
+  // Diferencia matemática entre lo licitado y el catálogo
+  const diferenciaNeta = montoEvaluable - montoMercado;
 
   return {
     montoTotal,
     montoNoEvaluable,
     montoEvaluable,
-    porcentajeMedible: montoTotal > 0 ? montoEvaluable / montoTotal * 100 : 0,
-    montoMercado: Number(licitacion?.monto_mercado) || 0,
+    porcentajeMedible: montoTotal > 0 ? (montoEvaluable / montoTotal) * 100 : 0,
+    montoMercado,
     excedenteBruto,
     sobrevalorado,
     irregular,
+    ahorroEstimado,
+    diferenciaNeta,
   };
 }
 

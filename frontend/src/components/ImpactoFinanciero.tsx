@@ -71,24 +71,31 @@ function versionesOriginales(licitaciones: Licitacion[]): Licitacion[] {
 
 export function ResumenImpactoLicitaciones({ licitaciones }: { licitaciones: Licitacion[] }) {
   const originales = versionesOriginales(Array.isArray(licitaciones) ? licitaciones.filter(Boolean) : []);
+  
   const sumas = originales.map(calcularImpactoFinanciero).reduce((total, actual) => ({
     montoTotal: total.montoTotal + actual.montoTotal,
     montoEvaluable: total.montoEvaluable + actual.montoEvaluable,
     montoMercado: total.montoMercado + actual.montoMercado,
     excedenteBruto: total.excedenteBruto + actual.excedenteBruto,
-  }), { montoTotal: 0, montoEvaluable: 0, montoMercado: 0, excedenteBruto: 0 });
-  const expediente = (Array.isArray(licitaciones) ? licitaciones : [])
-    .filter((licitacion) => licitacion?.codigo === "DASAC-CCC-LPA-2026-0011")
-    .sort((a, b) => Number(a.version) - Number(b.version));
-  const original = expediente.find((licitacion) => Number(licitacion.version) === 1);
-  const enmienda = expediente.find((licitacion) => Number(licitacion.version) > 1);
+    ahorroEstimado: total.ahorroEstimado + actual.ahorroEstimado,
+    diferenciaNeta: total.diferenciaNeta + actual.diferenciaNeta,
+  }), { 
+    montoTotal: 0, 
+    montoEvaluable: 0, 
+    montoMercado: 0, 
+    excedenteBruto: 0, 
+    ahorroEstimado: 0, 
+    diferenciaNeta: 0 
+  });
 
   return (
-    <section aria-label="Resumen financiero sin duplicar las versiones del mismo expediente" className="mt-5 rounded-2xl border border-ultramar/15 bg-ultramar/[0.03] p-4 sm:p-5">
+    <section aria-label="Resumen financiero sin duplicar versiones" className="mt-5 rounded-2xl border border-ultramar/15 bg-ultramar/[0.03] p-4 sm:p-5">
       <h3 className="text-xs font-black uppercase tracking-[0.12em] text-slate-700">RESUMEN FINANCIERO DE LICITACIONES ANALIZADAS</h3>
       <p className="mt-1 text-[10px] text-slate-500">
         Se toma el Pliego Original por código de proceso como línea base de auditoría; las enmiendas se muestran como comparativo y no se suman dos veces.
       </p>
+      
+      {/* Primera fila: Totales analizados */}
       <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
         <div className="rounded-xl border border-slate-100 bg-white px-3 py-3">
           <p className="text-[9px] font-bold uppercase tracking-[0.1em] text-slate-500">Monto total analizado</p>
@@ -103,18 +110,22 @@ export function ResumenImpactoLicitaciones({ licitaciones }: { licitaciones: Lic
           <p className="mt-1 whitespace-nowrap text-sm font-black tabular-nums text-[#CE1126]">+{formatearRD(sumas.excedenteBruto)}</p>
         </div>
       </div>
-      {original && enmienda && original.id_version !== enmienda.id_version && (
-        <div className="mt-3 grid gap-2 sm:grid-cols-2">
-          <div className="rounded-xl border border-slate-200 bg-white px-3 py-3">
-            <p className="text-[9px] font-bold uppercase tracking-[0.1em] text-slate-500">Pliego Original · {original.codigo}</p>
-            <p className="mt-1 whitespace-nowrap text-sm font-black tabular-nums">{formatearRD(Number(original.monto_total) || 0)}</p>
-          </div>
-          <div className="rounded-xl border border-ultramar/20 bg-white px-3 py-3">
-            <p className="text-[9px] font-bold uppercase tracking-[0.1em] text-ultramar">Enmienda evaluada · {enmienda.codigo}</p>
-            <p className="mt-1 whitespace-nowrap text-sm font-black tabular-nums text-ultramar">{formatearRD(Number(enmienda.monto_total) || 0)}</p>
-          </div>
+
+      {/* Segunda fila: Ahorro y Balance Neto (reemplaza caso fijo DASAC) */}
+      <div className="mt-3 grid gap-2 sm:grid-cols-2">
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50/40 px-3 py-3">
+          <p className="text-[9px] font-bold uppercase tracking-[0.1em] text-emerald-700">Ahorro frente al mercado</p>
+          <p className="mt-1 whitespace-nowrap text-sm font-black tabular-nums text-emerald-600">-{formatearRD(sumas.ahorroEstimado)}</p>
+          <p className="mt-1 text-[10px] text-emerald-700/70">En renglones comprados a precio justo</p>
         </div>
-      )}
+        <div className="rounded-xl border border-slate-200 bg-white px-3 py-3">
+          <p className="text-[9px] font-bold uppercase tracking-[0.1em] text-slate-500">Diferencia Neta (Licitado vs Mercado)</p>
+          <p className={`mt-1 whitespace-nowrap text-sm font-black tabular-nums ${sumas.diferenciaNeta > 0 ? "text-amber-600" : "text-slate-700"}`}>
+            {sumas.diferenciaNeta > 0 ? "+" : ""}{formatearRD(sumas.diferenciaNeta)}
+          </p>
+          <p className="mt-1 text-[10px] text-slate-400">Balance final entre sobreprecios y ahorros</p>
+        </div>
+      </div>
     </section>
   );
 }
