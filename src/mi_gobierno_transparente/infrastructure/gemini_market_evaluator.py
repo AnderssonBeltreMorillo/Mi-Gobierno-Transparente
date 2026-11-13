@@ -35,13 +35,14 @@ class GeminiMarketEvaluator:
 
         prompt = f"""
         Actúa como auditor experto en compras públicas de la República Dominicana.
-        Te enviaré un JSON con un lote de productos solicitados por el Estado y los posibles candidatos del supermercado para cada uno.
+        Tu tarea es emparejar estrictamente cada producto solicitado por la DGCP con su equivalente EXACTO en la lista de candidatos de los supermercados.
 
-        INSTRUCCIONES DE EVALUACIÓN PARA CADA ITEM:
-        1. Identidad: El resultado debe ser el mismo producto base. No cruces granos/especias con carnes, bebidas frías o snacks mixtos ('Pimienta' no es 'Pollo con Pimienta'; 'Café' no es 'Latte Frío').
-        2. Proporción Lógica: Si piden Galón/Fardo, descarta onzas pequeñas.
-        3. Falsos Positivos de Peso: Corrige errores obvios de digitación estatal (ej. 'Habichuelas Rojas 2 Gramos' seguramente significa '2 Libras').
-        4. Factor: Si piden 'CAJA/48' y el supermercado vende unidad, factor=48. Si supermercado dice 'Aprox 5-7 unidades por libra' y piden 'LIBRA', factor=1 (ambos son libras).
+        REGLAS INQUEBRANTABLES DE AUDITORÍA:
+        1. Identidad Estricta: El resultado debe ser exactamente el mismo producto. Rechaza mezclas incompatibles (ej. 'Café en grano' NO es 'Latte Frío'; 'Pimienta' NO es 'Pollo a la pimienta').
+        2. Unidad de Medida (¡CRÍTICO!): Debes analizar el peso o volumen. Si la DGCP pide "Galón" (128 oz) y el supermercado ofrece "16 oz", debes calcular el `factor_multiplicador` exacto (128 / 16 = 8). Si no puedes establecer una proporción matemática lógica, RECHAZA la oferta devolviendo null.
+        3. Falsos Positivos de Empaque: "Salsa de Tomate" en lata de 8 oz NO es lo mismo que en frasco de cristal de 16 oz. Elige la presentación comercial idéntica o más similar.
+        4. Corrección de Digitación: Corrige errores obvios de la DGCP (ej. 'Habichuelas Rojas 2 Gramos' seguramente significa '2 Libras'). Aplica sentido común solo en errores de tipeo de la unidad.
+        5. Preferencia al Ahorro Real: Si hay dos candidatos idénticos en volumen/peso y marca (o genéricos), elige siempre el de MENOR precio.
 
         DATOS A EVALUAR:
         {json.dumps(bloque_datos, indent=2, ensure_ascii=False)}
@@ -51,8 +52,8 @@ class GeminiMarketEvaluator:
           {{
             "id_articulo": "ID_DEL_ARTICULO",
             "id_oferta_elegida": (int con el id del candidato ganador, o null si ninguno sirve),
-            "factor_multiplicador": (float, el factor a aplicar al precio),
-            "razonamiento": "explicación breve"
+            "factor_multiplicador": (float, el factor a aplicar al precio del supermercado para igualar lo pedido por DGCP),
+            "razonamiento": "Explicación breve de por qué coincide o por qué se calculó el factor"
           }}
         ]
         """
