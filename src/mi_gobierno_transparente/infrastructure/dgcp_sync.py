@@ -42,7 +42,7 @@ _PALABRAS_ASEO = (
     "escoba", "trapeador", "limpiador", "fundas", "bolsas para basura",
 )
 
-_MOTOR_VERSION = "2026-11-escenarios-abc"
+_MOTOR_VERSION = "2026-11-auditor-estricto"
 
 
 def _normalizar(texto: str) -> str:
